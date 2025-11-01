@@ -118,11 +118,11 @@ func (s *Server) handleUpdateGlobalConfig(c *gin.Context) {
 		return
 	}
 
-	log.Println("✓ 全局配置已更新（需要重启服务生效）")
+	log.Println("✓ 全局配置已更新")
 
 	c.JSON(200, gin.H{
 		"success": true,
-		"message": "配置更新成功，请重启服务使配置生效",
+		"message": "配置更新成功",
 	})
 }
 
