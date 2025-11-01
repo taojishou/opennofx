@@ -620,9 +620,26 @@ export default function ConfigManagement() {
                           max="200"
                           value={kline.limit}
                           onChange={(e) => {
-                            const newKlines = [...config.market_data!.klines];
-                            newKlines[index].limit = parseInt(e.target.value) || 20;
-                            updateGlobalConfig({ market_data: { klines: newKlines } });
+                            const val = e.target.value;
+                            // 允许空值和数字输入
+                            if (val === '' || !isNaN(Number(val))) {
+                              const newKlines = [...config.market_data!.klines];
+                              newKlines[index].limit = val === '' ? 20 : parseInt(val);
+                              updateGlobalConfig({ market_data: { klines: newKlines } });
+                            }
+                          }}
+                          onBlur={(e) => {
+                            // 失焦时确保有效值
+                            const val = parseInt(e.target.value);
+                            if (isNaN(val) || val < 5) {
+                              const newKlines = [...config.market_data!.klines];
+                              newKlines[index].limit = 20;
+                              updateGlobalConfig({ market_data: { klines: newKlines } });
+                            } else if (val > 200) {
+                              const newKlines = [...config.market_data!.klines];
+                              newKlines[index].limit = 200;
+                              updateGlobalConfig({ market_data: { klines: newKlines } });
+                            }
                           }}
                           className="w-full px-3 py-2 rounded-lg"
                           style={{ background: '#1E2329', color: '#EAECEF', border: '1px solid #474D57' }}
