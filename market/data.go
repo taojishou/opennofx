@@ -60,6 +60,7 @@ type IntradayData struct {
 
 // LongerTermData 长期数据(4小时时间框架)
 type LongerTermData struct {
+	Klines        []KlinePoint // K线数据
 	EMA20         float64
 	EMA50         float64
 	ATR3          float64
@@ -466,8 +467,26 @@ func calculateIntradaySeries(klines []Kline) *IntradayData {
 // calculateLongerTermData 计算长期数据
 func calculateLongerTermData(klines []Kline) *LongerTermData {
 	data := &LongerTermData{
+		Klines:      make([]KlinePoint, 0, len(klines)),
 		MACDValues:  make([]float64, 0, 10),
 		RSI14Values: make([]float64, 0, 10),
+	}
+	
+	// 转换K线数据格式
+	for _, k := range klines {
+		change := 0.0
+		if k.Open != 0 {
+			change = (k.Close - k.Open) / k.Open * 100
+		}
+		data.Klines = append(data.Klines, KlinePoint{
+			Timestamp: k.OpenTime / 1000,
+			Open:      k.Open,
+			High:      k.High,
+			Low:       k.Low,
+			Close:     k.Close,
+			Volume:    k.Volume,
+			Change:    change,
+		})
 	}
 
 	// 计算EMA
@@ -609,7 +628,7 @@ func FormatWithKlineTable(data *Data, showKlineTable bool) string {
 		
 		sb.WriteString(fmt.Sprintf("Intraday series (%s intervals, oldest → latest):\n\n", intervalName))
 		
-		// 输出完整K线表格（根据配置决定，且调用方允许显示）
+		// 输出K线数据（根据配置决定，且调用方允许显示）
 		if len(data.IntradaySeries.Klines) > 0 && shortTerm.ShowTable && showKlineTable {
 			// 只显示配置数量的K线（数据里有更多用于计算指标）
 			displayCount := shortTerm.Limit
@@ -618,39 +637,36 @@ func FormatWithKlineTable(data *Data, showKlineTable bool) string {
 			}
 			startIdx := len(data.IntradaySeries.Klines) - displayCount
 			
-			sb.WriteString(fmt.Sprintf("**%sK线表格**（最近%d根）:\n\n", intervalName, displayCount))
-			sb.WriteString("序号 | 时间     | 开盘    | 最高    | 最低    | 收盘    | 涨跌幅   | 成交量\n")
-			sb.WriteString("-----|----------|---------|---------|---------|---------|----------|--------\n")
+			// 提取时间范围
+			startTime := formatTimestamp(data.IntradaySeries.Klines[startIdx].Timestamp)
+			endTime := formatTimestamp(data.IntradaySeries.Klines[len(data.IntradaySeries.Klines)-1].Timestamp)
 			
-			for idx := startIdx; idx < len(data.IntradaySeries.Klines); idx++ {
+			sb.WriteString(fmt.Sprintf("**%sK线数据**（最近%d根，%s~%s）:\n\n", intervalName, displayCount, startTime, endTime))
+			
+			// 提取各项数据为数组
+			opens := make([]string, displayCount)
+			highs := make([]string, displayCount)
+			lows := make([]string, displayCount)
+			closes := make([]string, displayCount)
+			changes := make([]string, displayCount)
+			volumes := make([]string, displayCount)
+			
+			for i, idx := 0, startIdx; idx < len(data.IntradaySeries.Klines); i, idx = i+1, idx+1 {
 				kline := data.IntradaySeries.Klines[idx]
-				timeStr := formatTimestamp(kline.Timestamp)
-				changeStr := fmt.Sprintf("%+.2f%%", kline.Change)
-				
-				// 特殊标记
-				marker := ""
-				if math.Abs(kline.Change) > 1.0 {
-					if kline.Change > 0 {
-						marker = " 🚀"
-					} else {
-						marker = " ⚠️"
-					}
-				}
-				
-				sb.WriteString(fmt.Sprintf("%-4d | %s | %.2f | %.2f | %.2f | %.2f | %-8s | %.0f%s\n",
-					idx-startIdx+1, timeStr, kline.Open, kline.High, kline.Low, kline.Close, changeStr, kline.Volume, marker))
+				opens[i] = fmt.Sprintf("%.2f", kline.Open)
+				highs[i] = fmt.Sprintf("%.2f", kline.High)
+				lows[i] = fmt.Sprintf("%.2f", kline.Low)
+				closes[i] = fmt.Sprintf("%.2f", kline.Close)
+				changes[i] = fmt.Sprintf("%+.2f%%", kline.Change)
+				volumes[i] = fmt.Sprintf("%.0f", kline.Volume)
 			}
-			sb.WriteString("\n")
 			
-			// 关键价格位
-			if data.IntradaySeries.PriceRange > 0 {
-				currentPos := (data.CurrentPrice - data.IntradaySeries.LowestPrice) / data.IntradaySeries.PriceRange * 100
-				sb.WriteString(fmt.Sprintf("**关键价格位**（1小时区间）:\n"))
-				sb.WriteString(fmt.Sprintf("- 最高: %.2f | 最低: %.2f | 区间: %.2f (%.2f%%)\n",
-					data.IntradaySeries.HighestPrice, data.IntradaySeries.LowestPrice,
-					data.IntradaySeries.PriceRange, data.IntradaySeries.PriceRange/data.CurrentPrice*100))
-				sb.WriteString(fmt.Sprintf("- 当前价位: %.2f (在区间%.0f%%位置)\n\n", data.CurrentPrice, currentPos))
-			}
+			sb.WriteString(fmt.Sprintf("Open: [%s]\n", strings.Join(opens, ", ")))
+			sb.WriteString(fmt.Sprintf("High: [%s]\n", strings.Join(highs, ", ")))
+			sb.WriteString(fmt.Sprintf("Low: [%s]\n", strings.Join(lows, ", ")))
+			sb.WriteString(fmt.Sprintf("Close: [%s]\n", strings.Join(closes, ", ")))
+			sb.WriteString(fmt.Sprintf("Change: [%s]\n", strings.Join(changes, ", ")))
+			sb.WriteString(fmt.Sprintf("Volume: [%s]\n\n", strings.Join(volumes, ", ")))
 		}
 		
 		// K线形态识别
@@ -686,9 +702,48 @@ func FormatWithKlineTable(data *Data, showKlineTable bool) string {
 		}
 	}
 
-	if data.LongerTermContext != nil {
-		sb.WriteString("Longer‑term context (4‑hour timeframe):\n\n")
+	if data.LongerTermContext != nil && len(DefaultKlineSettings) > 1 {
+		longTerm := DefaultKlineSettings[1]
+		intervalName := getIntervalName(longTerm.Interval)
+		
+		sb.WriteString(fmt.Sprintf("Longer‑term context (%s timeframe):\n\n", intervalName))
 
+		// 如果配置了显示K线数据，则显示
+		if len(data.LongerTermContext.Klines) > 0 && longTerm.ShowTable && showKlineTable {
+			displayCount := longTerm.Limit
+			if displayCount > len(data.LongerTermContext.Klines) {
+				displayCount = len(data.LongerTermContext.Klines)
+			}
+			startIdx := len(data.LongerTermContext.Klines) - displayCount
+			
+			startTime := formatTimestamp(data.LongerTermContext.Klines[startIdx].Timestamp)
+			endTime := formatTimestamp(data.LongerTermContext.Klines[len(data.LongerTermContext.Klines)-1].Timestamp)
+			
+			sb.WriteString(fmt.Sprintf("**%sK线数据**（最近%d根，%s~%s）:\n\n", intervalName, displayCount, startTime, endTime))
+			
+			opens := make([]string, displayCount)
+			highs := make([]string, displayCount)
+			lows := make([]string, displayCount)
+			closes := make([]string, displayCount)
+			changes := make([]string, displayCount)
+			
+			for i, idx := 0, startIdx; idx < len(data.LongerTermContext.Klines); i, idx = i+1, idx+1 {
+				kline := data.LongerTermContext.Klines[idx]
+				opens[i] = fmt.Sprintf("%.2f", kline.Open)
+				highs[i] = fmt.Sprintf("%.2f", kline.High)
+				lows[i] = fmt.Sprintf("%.2f", kline.Low)
+				closes[i] = fmt.Sprintf("%.2f", kline.Close)
+				changes[i] = fmt.Sprintf("%+.2f%%", kline.Change)
+			}
+			
+			sb.WriteString(fmt.Sprintf("Open: [%s]\n", strings.Join(opens, ", ")))
+			sb.WriteString(fmt.Sprintf("High: [%s]\n", strings.Join(highs, ", ")))
+			sb.WriteString(fmt.Sprintf("Low: [%s]\n", strings.Join(lows, ", ")))
+			sb.WriteString(fmt.Sprintf("Close: [%s]\n", strings.Join(closes, ", ")))
+			sb.WriteString(fmt.Sprintf("Change: [%s]\n\n", strings.Join(changes, ", ")))
+		}
+
+		// 技术指标
 		sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
 			data.LongerTermContext.EMA20, data.LongerTermContext.EMA50))
 
