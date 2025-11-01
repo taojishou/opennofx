@@ -55,17 +55,19 @@ type OITopData struct {
 
 // Context 交易上下文（传递给AI的完整信息）
 type Context struct {
-	CurrentTime     string                  `json:"current_time"`
-	RuntimeMinutes  int                     `json:"runtime_minutes"`
-	CallCount       int                     `json:"call_count"`
-	Account         AccountInfo             `json:"account"`
-	Positions       []PositionInfo          `json:"positions"`
-	CandidateCoins  []CandidateCoin         `json:"candidate_coins"`
-	MarketDataMap   map[string]*market.Data `json:"-"` // 不序列化，但内部使用
-	OITopDataMap    map[string]*OITopData   `json:"-"` // OI Top数据映射
-	Performance     interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
-	BTCETHLeverage  int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
-	AltcoinLeverage int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	CurrentTime       string                  `json:"current_time"`
+	RuntimeMinutes    int                     `json:"runtime_minutes"`
+	CallCount         int                     `json:"call_count"`
+	Account           AccountInfo             `json:"account"`
+	Positions         []PositionInfo          `json:"positions"`
+	CandidateCoins    []CandidateCoin         `json:"candidate_coins"`
+	MarketDataMap     map[string]*market.Data `json:"-"` // 不序列化，但内部使用
+	OITopDataMap      map[string]*OITopData   `json:"-"` // OI Top数据映射
+	Performance       interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
+	BTCETHLeverage    int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
+	AltcoinLeverage   int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
+	MaxPositions      int                     `json:"-"` // 最大持仓数限制（从配置读取）
+	AILearningSummary string                  `json:"-"` // AI学习总结（从数据库加载）
 }
 
 // Decision AI的交易决策
@@ -408,6 +410,13 @@ func buildUserPrompt(ctx *Context) string {
 				sb.WriteString(fmt.Sprintf("## 📊 夏普比率: %.2f\n\n", perfData.SharpeRatio))
 			}
 		}
+	}
+
+	// AI学习总结（如果有）
+	if ctx.AILearningSummary != "" {
+		sb.WriteString("## 📚 AI历史交易学习总结\n\n")
+		sb.WriteString(ctx.AILearningSummary)
+		sb.WriteString("\n\n")
 	}
 
 	sb.WriteString("---\n\n")

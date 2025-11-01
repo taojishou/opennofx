@@ -23,7 +23,7 @@ func NewTraderManager() *TraderManager {
 }
 
 // AddTrader 添加一个trader
-func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig) error {
+func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, maxPositions int, enableAILearning bool, aiLearnInterval int) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -56,6 +56,9 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		InitialBalance:        cfg.InitialBalance,
 		BTCETHLeverage:        leverage.BTCETHLeverage,  // 使用配置的杠杆倍数
 		AltcoinLeverage:       leverage.AltcoinLeverage, // 使用配置的杠杆倍数
+		MaxPositions:          maxPositions,             // 使用配置的最大持仓数
+		EnableAILearning:      enableAILearning,         // AI学习开关
+		AILearnInterval:       aiLearnInterval,          // AI学习间隔
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
@@ -150,18 +153,21 @@ func (tm *TraderManager) GetComparisonData() (map[string]interface{}, error) {
 		}
 
 		status := t.GetStatus()
+		isPaused := t.IsPaused()
 
 		traders = append(traders, map[string]interface{}{
 			"trader_id":       t.GetID(),
 			"trader_name":     t.GetName(),
 			"ai_model":        t.GetAIModel(),
+			"exchange":        status["exchange"],
 			"total_equity":    account["total_equity"],
 			"total_pnl":       account["total_pnl"],
 			"total_pnl_pct":   account["total_pnl_pct"],
 			"position_count":  account["position_count"],
 			"margin_used_pct": account["margin_used_pct"],
 			"call_count":      status["call_count"],
-			"is_running":      status["is_running"],
+			"is_running":      status["is_running"].(bool) && !isPaused,
+			"is_paused":       isPaused,
 		})
 	}
 
@@ -169,4 +175,122 @@ func (tm *TraderManager) GetComparisonData() (map[string]interface{}, error) {
 	comparison["count"] = len(traders)
 
 	return comparison, nil
+}
+
+// ReloadConfig 热重载配置
+func (tm *TraderManager) ReloadConfig(newConfig *config.Config) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	log.Println("🔄 开始热重载配置...")
+
+	// 1. 记录现有traders
+	oldTraders := make(map[string]*trader.AutoTrader)
+	for id, t := range tm.traders {
+		oldTraders[id] = t
+	}
+
+	// 2. 构建币种池URL
+	coinPoolURL := ""
+	if newConfig.UseDefaultCoins {
+		coinPoolURL = newConfig.CoinPoolAPIURL
+	} else {
+		coinPoolURL = newConfig.OITopAPIURL
+	}
+
+	// 3. 处理新配置中的每个trader
+	newTraders := make(map[string]*trader.AutoTrader)
+	
+	for _, traderCfg := range newConfig.Traders {
+		if !traderCfg.Enabled {
+			log.Printf("⏸️  Trader '%s' 已禁用，跳过", traderCfg.ID)
+			continue
+		}
+
+		// 如果trader已存在，保留它
+		if existingTrader, exists := oldTraders[traderCfg.ID]; exists {
+			log.Printf("✓ Trader '%s' 已存在，保留", traderCfg.ID)
+			newTraders[traderCfg.ID] = existingTrader
+			delete(oldTraders, traderCfg.ID)
+		} else {
+			// 创建新trader
+			log.Printf("➕ 创建新Trader: %s", traderCfg.ID)
+			err := tm.addTraderUnlocked(traderCfg, coinPoolURL, 
+				newConfig.MaxDailyLoss, newConfig.MaxDrawdown, 
+				newConfig.StopTradingMinutes, newConfig.Leverage, 
+				newConfig.MaxPositions)
+			if err != nil {
+				log.Printf("❌ 创建Trader %s 失败: %v", traderCfg.ID, err)
+				continue
+			}
+			newTraders[traderCfg.ID] = tm.traders[traderCfg.ID]
+		}
+	}
+
+	// 4. 停止已删除的traders
+	for id, t := range oldTraders {
+		log.Printf("⏹  停止并删除Trader: %s", id)
+		t.Stop()
+	}
+
+	// 5. 更新traders map
+	tm.traders = newTraders
+
+	log.Printf("✅ 热重载完成，当前活跃Traders: %d", len(tm.traders))
+	return nil
+}
+
+// addTraderUnlocked 添加trader（不加锁版本，供ReloadConfig使用）
+func (tm *TraderManager) addTraderUnlocked(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, maxPositions int) error {
+	if _, exists := tm.traders[cfg.ID]; exists {
+		return fmt.Errorf("trader ID '%s' 已存在", cfg.ID)
+	}
+
+	// 构建AutoTraderConfig
+	traderConfig := trader.AutoTraderConfig{
+		ID:                    cfg.ID,
+		Name:                  cfg.Name,
+		AIModel:               cfg.AIModel,
+		Exchange:              cfg.Exchange,
+		BinanceAPIKey:         cfg.BinanceAPIKey,
+		BinanceSecretKey:      cfg.BinanceSecretKey,
+		HyperliquidPrivateKey: cfg.HyperliquidPrivateKey,
+		HyperliquidWalletAddr: cfg.HyperliquidWalletAddr,
+		HyperliquidTestnet:    cfg.HyperliquidTestnet,
+		AsterUser:             cfg.AsterUser,
+		AsterSigner:           cfg.AsterSigner,
+		AsterPrivateKey:       cfg.AsterPrivateKey,
+		CoinPoolAPIURL:        coinPoolURL,
+		UseQwen:               cfg.AIModel == "qwen",
+		DeepSeekKey:           cfg.DeepSeekKey,
+		QwenKey:               cfg.QwenKey,
+		CustomAPIURL:          cfg.CustomAPIURL,
+		CustomAPIKey:          cfg.CustomAPIKey,
+		CustomModelName:       cfg.CustomModelName,
+		ScanInterval:          cfg.GetScanInterval(),
+		InitialBalance:        cfg.InitialBalance,
+		BTCETHLeverage:        leverage.BTCETHLeverage,
+		AltcoinLeverage:       leverage.AltcoinLeverage,
+		MaxPositions:          maxPositions,
+		MaxDailyLoss:          maxDailyLoss,
+		MaxDrawdown:           maxDrawdown,
+		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
+	}
+
+	// 创建trader实例
+	at, err := trader.NewAutoTrader(traderConfig)
+	if err != nil {
+		return fmt.Errorf("创建trader失败: %w", err)
+	}
+
+	tm.traders[cfg.ID] = at
+	
+	// 立即启动新trader
+	go func() {
+		if err := at.Run(); err != nil {
+			log.Printf("❌ %s 运行错误: %v", at.GetName(), err)
+		}
+	}()
+
+	return nil
 }

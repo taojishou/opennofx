@@ -599,6 +599,45 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 	return fmt.Sprintf(format, quantity), nil
 }
 
+// GetAccountTrades 获取账户历史成交记录（用于追踪止损止盈订单）
+func (t *FuturesTrader) GetAccountTrades(symbol string, limit int) ([]map[string]interface{}, error) {
+	service := t.client.NewListAccountTradeService().Symbol(symbol)
+	if limit > 0 {
+		service = service.Limit(limit)
+	}
+	
+	trades, err := service.Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("获取历史成交失败: %w", err)
+	}
+	
+	var result []map[string]interface{}
+	for _, trade := range trades {
+		priceFloat, _ := strconv.ParseFloat(trade.Price, 64)
+		qtyFloat, _ := strconv.ParseFloat(trade.Quantity, 64)
+		realizedPnlFloat, _ := strconv.ParseFloat(trade.RealizedPnl, 64)
+		
+		result = append(result, map[string]interface{}{
+			"id":            trade.ID,
+			"orderId":       trade.OrderID,
+			"symbol":        trade.Symbol,
+			"side":          trade.Side,
+			"price":         priceFloat,
+			"qty":           qtyFloat,
+			"quoteQty":      trade.QuoteQuantity,
+			"commission":    trade.Commission,
+			"commissionAsset": trade.CommissionAsset,
+			"time":          trade.Time,
+			"buyer":         trade.Buyer,
+			"maker":         trade.Maker,
+			"positionSide":  trade.PositionSide,
+			"realizedPnl":   realizedPnlFloat,
+		})
+	}
+	
+	return result, nil
+}
+
 // 辅助函数
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && stringContains(s, substr)

@@ -8,6 +8,9 @@ type Trader interface {
 
 	// GetPositions 获取所有持仓
 	GetPositions() ([]map[string]interface{}, error)
+	
+	// GetAccountTrades 获取账户历史成交（最近N条）
+	GetAccountTrades(symbol string, limit int) ([]map[string]interface{}, error)
 
 	// OpenLong 开多仓
 	OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error)

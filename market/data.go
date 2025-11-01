@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Data 市场数据结构
@@ -31,13 +32,29 @@ type OIData struct {
 	Average float64
 }
 
+// KlinePoint 完整K线数据点
+type KlinePoint struct {
+	Timestamp int64   // 时间戳（秒）
+	Open      float64 // 开盘价
+	High      float64 // 最高价
+	Low       float64 // 最低价
+	Close     float64 // 收盘价
+	Volume    float64 // 成交量
+	Change    float64 // 涨跌幅%
+}
+
 // IntradayData 日内数据(3分钟间隔)
 type IntradayData struct {
-	MidPrices   []float64
-	EMA20Values []float64
-	MACDValues  []float64
-	RSI7Values  []float64
-	RSI14Values []float64
+	MidPrices   []float64     // 收盘价序列（保留兼容）
+	EMA20Values []float64     // EMA20序列
+	MACDValues  []float64     // MACD序列
+	RSI7Values  []float64     // RSI7序列
+	RSI14Values []float64     // RSI14序列
+	Klines      []KlinePoint  // 完整K线数据（新增）
+	HighestPrice float64      // 最高价
+	LowestPrice  float64      // 最低价
+	PriceRange   float64      // 价格区间
+	Patterns     []string     // K线形态
 }
 
 // LongerTermData 长期数据(4小时时间框架)
@@ -298,21 +315,51 @@ func calculateATR(klines []Kline, period int) float64 {
 // calculateIntradaySeries 计算日内系列数据
 func calculateIntradaySeries(klines []Kline) *IntradayData {
 	data := &IntradayData{
-		MidPrices:   make([]float64, 0, 10),
-		EMA20Values: make([]float64, 0, 10),
-		MACDValues:  make([]float64, 0, 10),
-		RSI7Values:  make([]float64, 0, 10),
-		RSI14Values: make([]float64, 0, 10),
+		MidPrices:   make([]float64, 0, 20),
+		EMA20Values: make([]float64, 0, 20),
+		MACDValues:  make([]float64, 0, 20),
+		RSI7Values:  make([]float64, 0, 20),
+		RSI14Values: make([]float64, 0, 20),
+		Klines:      make([]KlinePoint, 0, 20),
 	}
 
-	// 获取最近10个数据点
-	start := len(klines) - 10
+	// 获取最近20个数据点（1小时数据）
+	start := len(klines) - 20
 	if start < 0 {
 		start = 0
 	}
+	
+	// 初始化最高最低价
+	data.HighestPrice = 0
+	data.LowestPrice = 999999999
 
 	for i := start; i < len(klines); i++ {
 		data.MidPrices = append(data.MidPrices, klines[i].Close)
+		
+		// 计算涨跌幅
+		change := 0.0
+		if i > 0 {
+			change = (klines[i].Close - klines[i-1].Close) / klines[i-1].Close * 100
+		}
+		
+		// 添加完整K线数据
+		data.Klines = append(data.Klines, KlinePoint{
+			Timestamp: klines[i].OpenTime / 1000, // 转为秒
+			Open:      klines[i].Open,
+			High:      klines[i].High,
+			Low:       klines[i].Low,
+			Close:     klines[i].Close,
+			Volume:    klines[i].Volume,
+			Change:    change,
+		})
+		
+		// 更新最高最低价
+		if klines[i].High > data.HighestPrice {
+			data.HighestPrice = klines[i].High
+		}
+		if klines[i].Low < data.LowestPrice {
+			data.LowestPrice = klines[i].Low
+		}
 
 		// 计算每个点的EMA20
 		if i >= 19 {
@@ -336,6 +383,12 @@ func calculateIntradaySeries(klines []Kline) *IntradayData {
 			data.RSI14Values = append(data.RSI14Values, rsi14)
 		}
 	}
+	
+	// 计算价格区间
+	data.PriceRange = data.HighestPrice - data.LowestPrice
+	
+	// 识别K线形态
+	data.Patterns = identifyPatterns(klines[start:])
 
 	return data
 }
@@ -471,7 +524,55 @@ func Format(data *Data) string {
 
 	if data.IntradaySeries != nil {
 		sb.WriteString("Intraday series (3‑minute intervals, oldest → latest):\n\n")
+		
+		// 输出完整K线表格（最近20根）
+		if len(data.IntradaySeries.Klines) > 0 {
+			sb.WriteString("**3分钟K线表格**（最近20根，1小时数据）:\n\n")
+			sb.WriteString("序号 | 时间     | 开盘    | 最高    | 最低    | 收盘    | 涨跌幅   | 成交量\n")
+			sb.WriteString("-----|----------|---------|---------|---------|---------|----------|--------\n")
+			
+			for idx, kline := range data.IntradaySeries.Klines {
+				timeStr := formatTimestamp(kline.Timestamp)
+				changeStr := fmt.Sprintf("%+.2f%%", kline.Change)
+				
+				// 特殊标记
+				marker := ""
+				if math.Abs(kline.Change) > 1.0 {
+					if kline.Change > 0 {
+						marker = " 🚀"
+					} else {
+						marker = " ⚠️"
+					}
+				}
+				
+				sb.WriteString(fmt.Sprintf("%-4d | %s | %.2f | %.2f | %.2f | %.2f | %-8s | %.0f%s\n",
+					idx+1, timeStr, kline.Open, kline.High, kline.Low, kline.Close, changeStr, kline.Volume, marker))
+			}
+			sb.WriteString("\n")
+			
+			// 关键价格位
+			if data.IntradaySeries.PriceRange > 0 {
+				currentPos := (data.CurrentPrice - data.IntradaySeries.LowestPrice) / data.IntradaySeries.PriceRange * 100
+				sb.WriteString(fmt.Sprintf("**关键价格位**（1小时区间）:\n"))
+				sb.WriteString(fmt.Sprintf("- 最高: %.2f | 最低: %.2f | 区间: %.2f (%.2f%%)\n",
+					data.IntradaySeries.HighestPrice, data.IntradaySeries.LowestPrice,
+					data.IntradaySeries.PriceRange, data.IntradaySeries.PriceRange/data.CurrentPrice*100))
+				sb.WriteString(fmt.Sprintf("- 当前价位: %.2f (在区间%.0f%%位置)\n\n", data.CurrentPrice, currentPos))
+			}
+		}
+		
+		// K线形态识别
+		if len(data.IntradaySeries.Patterns) > 0 {
+			sb.WriteString(fmt.Sprintf("**K线形态识别**: 检测到 %d 个信号\n", len(data.IntradaySeries.Patterns)))
+			for i, pattern := range data.IntradaySeries.Patterns {
+				sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, pattern))
+			}
+			sb.WriteString("\n")
+		}
 
+		// 技术指标序列（保持原有格式，便于AI分析）
+		sb.WriteString("**技术指标序列**:\n\n")
+		
 		if len(data.IntradaySeries.MidPrices) > 0 {
 			sb.WriteString(fmt.Sprintf("Mid prices: %s\n\n", formatFloatSlice(data.IntradaySeries.MidPrices)))
 		}
@@ -524,6 +625,193 @@ func formatFloatSlice(values []float64) string {
 		strValues[i] = fmt.Sprintf("%.3f", v)
 	}
 	return "[" + strings.Join(strValues, ", ") + "]"
+}
+
+// formatTimestamp 格式化时间戳为可读时间
+func formatTimestamp(timestamp int64) string {
+	t := time.Unix(timestamp, 0)
+	// 只显示时:分，更简洁
+	return t.Format("15:04")
+}
+
+// identifyPatterns 识别K线形态
+func identifyPatterns(klines []Kline) []string {
+	patterns := []string{}
+	
+	if len(klines) < 3 {
+		return patterns
+	}
+	
+	last := klines[len(klines)-1]
+	prev := klines[len(klines)-2]
+	
+	// 锤子线（看涨）
+	if isHammer(last) {
+		patterns = append(patterns, "🔨 锤子线（看涨信号）")
+	}
+	
+	// 倒锤子（潜在反转）
+	if isInvertedHammer(last) {
+		patterns = append(patterns, "🔨 倒锤子（潜在反转）")
+	}
+	
+	// 看涨吞没
+	if isBullishEngulfing(prev, last) {
+		patterns = append(patterns, "📈 看涨吞没（强烈看涨）")
+	}
+	
+	// 看跌吞没
+	if isBearishEngulfing(prev, last) {
+		patterns = append(patterns, "📉 看跌吞没（强烈看跌）")
+	}
+	
+	// 十字星（犹豫）
+	if isDoji(last) {
+		patterns = append(patterns, "✨ 十字星（方向不明）")
+	}
+	
+	// 射击之星（看跌）
+	if isShootingStar(last) {
+		patterns = append(patterns, "💫 射击之星（看跌信号）")
+	}
+	
+	// 三连阳
+	if len(klines) >= 3 {
+		prev2 := klines[len(klines)-3]
+		if isThreeWhiteSoldiers(prev2, prev, last) {
+			patterns = append(patterns, "🚀 三连阳（强势上涨）")
+		}
+		
+		// 三连阴
+		if isThreeBlackCrows(prev2, prev, last) {
+			patterns = append(patterns, "💀 三连阴（强势下跌）")
+		}
+	}
+	
+	return patterns
+}
+
+// isHammer 判断是否为锤子线
+func isHammer(k Kline) bool {
+	body := math.Abs(k.Close - k.Open)
+	upperShadow := k.High - math.Max(k.Open, k.Close)
+	lowerShadow := math.Min(k.Open, k.Close) - k.Low
+	totalRange := k.High - k.Low
+	
+	if totalRange == 0 {
+		return false
+	}
+	
+	// 下影线至少是实体的2倍，上影线很短，实体在上部
+	return lowerShadow > body*2 && upperShadow < body*0.5 && body/totalRange < 0.3
+}
+
+// isInvertedHammer 判断是否为倒锤子线
+func isInvertedHammer(k Kline) bool {
+	body := math.Abs(k.Close - k.Open)
+	upperShadow := k.High - math.Max(k.Open, k.Close)
+	lowerShadow := math.Min(k.Open, k.Close) - k.Low
+	totalRange := k.High - k.Low
+	
+	if totalRange == 0 {
+		return false
+	}
+	
+	// 上影线至少是实体的2倍，下影线很短，实体在下部
+	return upperShadow > body*2 && lowerShadow < body*0.5 && body/totalRange < 0.3
+}
+
+// isShootingStar 判断是否为射击之星
+func isShootingStar(k Kline) bool {
+	body := math.Abs(k.Close - k.Open)
+	upperShadow := k.High - math.Max(k.Open, k.Close)
+	lowerShadow := math.Min(k.Open, k.Close) - k.Low
+	totalRange := k.High - k.Low
+	
+	if totalRange == 0 {
+		return false
+	}
+	
+	// 上影线很长，实体小，下影线很短，且收盘价接近最低价
+	isRedCandle := k.Close < k.Open
+	return upperShadow > body*2 && lowerShadow < body*0.3 && body/totalRange < 0.3 && isRedCandle
+}
+
+// isDoji 判断是否为十字星
+func isDoji(k Kline) bool {
+	body := math.Abs(k.Close - k.Open)
+	totalRange := k.High - k.Low
+	
+	if totalRange == 0 {
+		return false
+	}
+	
+	// 实体非常小（< 10%的总区间）
+	return body/totalRange < 0.1
+}
+
+// isBullishEngulfing 判断是否为看涨吞没
+func isBullishEngulfing(prev, curr Kline) bool {
+	prevIsRed := prev.Close < prev.Open
+	currIsGreen := curr.Close > curr.Open
+	
+	// 前一根是阴线，当前是阳线，且当前完全吞没前一根
+	return prevIsRed && currIsGreen && 
+		curr.Open < prev.Close && 
+		curr.Close > prev.Open
+}
+
+// isBearishEngulfing 判断是否为看跌吞没
+func isBearishEngulfing(prev, curr Kline) bool {
+	prevIsGreen := prev.Close > prev.Open
+	currIsRed := curr.Close < curr.Open
+	
+	// 前一根是阳线，当前是阴线，且当前完全吞没前一根
+	return prevIsGreen && currIsRed && 
+		curr.Open > prev.Close && 
+		curr.Close < prev.Open
+}
+
+// isThreeWhiteSoldiers 判断是否为三连阳
+func isThreeWhiteSoldiers(k1, k2, k3 Kline) bool {
+	// 三根都是阳线
+	all3Green := k1.Close > k1.Open && k2.Close > k2.Open && k3.Close > k3.Open
+	
+	// 收盘价逐步升高
+	ascending := k2.Close > k1.Close && k3.Close > k2.Close
+	
+	// 每根K线的涨幅相似（避免单根暴涨）
+	gain1 := (k1.Close - k1.Open) / k1.Open
+	gain2 := (k2.Close - k2.Open) / k2.Open
+	gain3 := (k3.Close - k3.Open) / k3.Open
+	
+	avgGain := (gain1 + gain2 + gain3) / 3
+	consistent := math.Abs(gain1-avgGain) < avgGain*0.5 &&
+		math.Abs(gain2-avgGain) < avgGain*0.5 &&
+		math.Abs(gain3-avgGain) < avgGain*0.5
+	
+	return all3Green && ascending && consistent
+}
+
+// isThreeBlackCrows 判断是否为三连阴
+func isThreeBlackCrows(k1, k2, k3 Kline) bool {
+	// 三根都是阴线
+	all3Red := k1.Close < k1.Open && k2.Close < k2.Open && k3.Close < k3.Open
+	
+	// 收盘价逐步降低
+	descending := k2.Close < k1.Close && k3.Close < k2.Close
+	
+	// 每根K线的跌幅相似
+	loss1 := (k1.Open - k1.Close) / k1.Open
+	loss2 := (k2.Open - k2.Close) / k2.Open
+	loss3 := (k3.Open - k3.Close) / k3.Open
+	
+	avgLoss := (loss1 + loss2 + loss3) / 3
+	consistent := math.Abs(loss1-avgLoss) < avgLoss*0.5 &&
+		math.Abs(loss2-avgLoss) < avgLoss*0.5 &&
+		math.Abs(loss3-avgLoss) < avgLoss*0.5
+	
+	return all3Red && descending && consistent
 }
 
 // Normalize 标准化symbol,确保是USDT交易对

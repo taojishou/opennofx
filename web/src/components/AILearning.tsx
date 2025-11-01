@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import useSWR from 'swr';
 import { useLanguage } from '../contexts/LanguageContext';
 import { t } from '../i18n/translations';
@@ -51,15 +52,37 @@ interface AILearningProps {
 
 export default function AILearning({ traderId }: AILearningProps) {
   const { language } = useLanguage();
+  const [generating, setGenerating] = useState(false);
+  
   const { data: performance, error } = useSWR<PerformanceAnalysis>(
     traderId ? `performance-${traderId}` : 'performance',
     () => api.getPerformance(traderId),
     {
-      refreshInterval: 30000, // 30秒刷新（AI学习分析数据更新频率较低）
-      revalidateOnFocus: false,
+      refreshInterval: 10000, // 10秒刷新（更频繁）
+      revalidateOnFocus: true, // 切换回标签页时自动刷新
       dedupingInterval: 20000,
     }
   );
+  
+  // 生成AI总结（暂时显示提示）
+  const handleGenerateSummary = async () => {
+    if (generating) return;
+    
+    setGenerating(true);
+    try {
+      // TODO: 调用API生成总结
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      alert(language === 'zh' 
+        ? '⚠️ AI分析功能开发中，请稍后使用' 
+        : '⚠️ AI analysis feature is under development');
+    } catch (error: any) {
+      alert(language === 'zh' 
+        ? `❌ 生成失败: ${error.message}` 
+        : `❌ Failed: ${error.message}`);
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   if (error) {
     return (
@@ -108,25 +131,52 @@ export default function AILearning({ traderId }: AILearningProps) {
           background: 'radial-gradient(circle, #8B5CF6 0%, transparent 70%)',
           filter: 'blur(60px)'
         }} />
-        <div className="relative flex items-center gap-4">
-          <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl" style={{
-            background: 'linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%)',
-            boxShadow: '0 8px 24px rgba(139, 92, 246, 0.5)',
-            border: '2px solid rgba(255, 255, 255, 0.1)'
-          }}>
-            🧠
-          </div>
-          <div>
-            <h2 className="text-3xl font-bold mb-1" style={{
-              color: '#EAECEF',
-              textShadow: '0 2px 8px rgba(139, 92, 246, 0.3)'
+        <div className="relative flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl" style={{
+              background: 'linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%)',
+              boxShadow: '0 8px 24px rgba(139, 92, 246, 0.5)',
+              border: '2px solid rgba(255, 255, 255, 0.1)'
             }}>
-              {t('aiLearning', language)}
-            </h2>
-            <p className="text-base" style={{ color: '#A78BFA' }}>
-              {t('tradesAnalyzed', language, { count: performance.total_trades })}
-            </p>
+              🧠
+            </div>
+            <div>
+              <h2 className="text-3xl font-bold mb-1" style={{
+                color: '#EAECEF',
+                textShadow: '0 2px 8px rgba(139, 92, 246, 0.3)'
+              }}>
+                {t('aiLearning', language)}
+              </h2>
+              <p className="text-base" style={{ color: '#A78BFA' }}>
+                {t('tradesAnalyzed', language, { count: performance.total_trades })}
+              </p>
+            </div>
           </div>
+          
+          {/* AI生成总结按钮 */}
+          <button
+            onClick={handleGenerateSummary}
+            disabled={generating || performance.total_trades < 5}
+            className="px-6 py-3 rounded-xl font-semibold text-sm transition-all hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              background: generating ? 'rgba(132, 142, 156, 0.2)' : 'linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%)',
+              color: '#FFFFFF',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              boxShadow: '0 4px 16px rgba(139, 92, 246, 0.4)'
+            }}
+            title={performance.total_trades < 5 ? (language === 'zh' ? '至少需要5笔交易' : 'Need at least 5 trades') : ''}
+          >
+            {generating ? (
+              <span className="flex items-center gap-2">
+                <span className="animate-spin">⏳</span>
+                {language === 'zh' ? '分析中...' : 'Analyzing...'}
+              </span>
+            ) : (
+              <span className="flex items-center gap-2">
+                🤖 {language === 'zh' ? '让AI总结历史交易' : 'AI Analyze Trades'}
+              </span>
+            )}
+          </button>
         </div>
       </div>
 

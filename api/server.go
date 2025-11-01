@@ -77,6 +77,30 @@ func (s *Server) setupRoutes() {
 		api.GET("/statistics", s.handleStatistics)
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
+
+		// Prompt配置相关路由（使用gin格式）
+		api.GET("/prompts", s.handleGetPrompts)
+		api.POST("/prompts/update", s.handleUpdatePrompt)
+		api.POST("/prompts/toggle", s.handleTogglePrompt)
+		api.GET("/prompts/preview", s.handlePreviewPrompt)
+
+		// 系统配置管理路由
+		api.GET("/config", s.handleGetConfig)
+		api.POST("/config/global/update", s.handleUpdateGlobalConfig)
+		api.POST("/config/trader/update", s.handleUpdateTraderConfig)
+		api.POST("/config/trader/add", s.handleAddTrader)
+		api.DELETE("/config/trader/delete", s.handleDeleteTrader)
+		
+		// 热重载路由
+		api.POST("/config/reload", s.handleReloadConfig)
+		
+		// 交易控制路由
+		api.POST("/trading/close-position", s.handleManualClosePosition)
+		api.POST("/trading/toggle-trader", s.handleToggleTrader)
+		
+		// AI学习总结路由
+		api.POST("/ai-learning/generate", s.handleGenerateAILearning)
+		api.GET("/ai-learning/summary", s.handleGetAILearningSummary)
 	}
 }
 
@@ -401,6 +425,203 @@ func (s *Server) handlePerformance(c *gin.Context) {
 	c.JSON(http.StatusOK, performance)
 }
 
+// handleGetPrompts 获取prompt配置
+func (s *Server) handleGetPrompts(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	db := trader.GetDecisionLogger().GetDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库未初始化"})
+		return
+	}
+
+	configs, err := db.GetAllPromptConfigs()
+	if err != nil {
+		log.Printf("获取prompt配置失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取配置失败"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    configs,
+	})
+}
+
+// handleUpdatePrompt 更新prompt配置
+func (s *Server) handleUpdatePrompt(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	var req struct {
+		SectionName  string `json:"section_name"`
+		Title        string `json:"title"`
+		Content      string `json:"content"`
+		Enabled      bool   `json:"enabled"`
+		DisplayOrder int    `json:"display_order"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	if req.SectionName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "section_name is required"})
+		return
+	}
+
+	db := trader.GetDecisionLogger().GetDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库未初始化"})
+		return
+	}
+
+	cfg := db.NewPromptConfig(req.SectionName, req.Title, req.Content, req.Enabled, req.DisplayOrder)
+
+	if err := db.UpdatePromptConfig(cfg); err != nil {
+		log.Printf("更新prompt配置失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败"})
+		return
+	}
+
+	log.Printf("✓ Prompt配置已更新: %s", req.SectionName)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "配置更新成功",
+	})
+}
+
+// handleTogglePrompt 切换prompt启用状态
+func (s *Server) handleTogglePrompt(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	var req struct {
+		SectionName string `json:"section_name"`
+		Enabled     bool   `json:"enabled"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	db := trader.GetDecisionLogger().GetDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库未初始化"})
+		return
+	}
+
+	configs, err := db.GetAllPromptConfigs()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取配置失败"})
+		return
+	}
+
+	var found bool
+	for _, cfg := range configs {
+		if cfg.SectionName == req.SectionName {
+			cfg.Enabled = req.Enabled
+			if err := db.UpdatePromptConfig(cfg); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败"})
+				return
+			}
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "配置不存在"})
+		return
+	}
+
+	status := "禁用"
+	if req.Enabled {
+		status = "启用"
+	}
+	log.Printf("✓ Prompt配置已%s: %s", status, req.SectionName)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": fmt.Sprintf("已%s配置", status),
+	})
+}
+
+// handlePreviewPrompt 预览完整prompt
+func (s *Server) handlePreviewPrompt(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	db := trader.GetDecisionLogger().GetDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库未初始化"})
+		return
+	}
+
+	// 获取账户信息用于变量替换
+	accountInfo, _ := trader.GetAccountInfo()
+	accountEquity := 100.0
+	if eq, ok := accountInfo["total_equity"].(float64); ok {
+		accountEquity = eq
+	}
+
+	// 获取杠杆配置（简化处理，使用默认值）
+	btcLeverage := 3
+	altLeverage := 10
+
+	prompt := BuildSystemPromptFromDB(db, accountEquity, btcLeverage, altLeverage)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data": gin.H{
+			"prompt":         prompt,
+			"account_equity": accountEquity,
+			"btc_leverage":   btcLeverage,
+			"alt_leverage":   altLeverage,
+		},
+	})
+}
+
 // Start 启动服务器
 func (s *Server) Start() error {
 	addr := fmt.Sprintf(":%d", s.port)
@@ -416,6 +637,10 @@ func (s *Server) Start() error {
 	log.Printf("  • GET  /api/statistics?trader_id=xxx - 指定trader的统计信息")
 	log.Printf("  • GET  /api/equity-history?trader_id=xxx - 指定trader的收益率历史数据")
 	log.Printf("  • GET  /api/performance?trader_id=xxx - 指定trader的AI学习表现分析")
+	log.Printf("  • GET  /api/prompts?trader_id=xxx    - 获取Prompt配置")
+	log.Printf("  • POST /api/prompts/update?trader_id=xxx - 更新Prompt配置")
+	log.Printf("  • POST /api/prompts/toggle?trader_id=xxx - 切换Prompt启用状态")
+	log.Printf("  • GET  /api/prompts/preview?trader_id=xxx - 预览完整Prompt")
 	log.Printf("  • GET  /health               - 健康检查")
 	log.Println()
 

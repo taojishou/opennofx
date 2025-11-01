@@ -110,4 +110,45 @@ export const api = {
     if (!res.ok) throw new Error('获取AI学习数据失败');
     return res.json();
   },
+
+  // 交易控制API
+  async closePosition(traderId: string, symbol: string, side: string): Promise<any> {
+    const res = await fetch(`${API_BASE}/trading/close-position`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trader_id: traderId, symbol, side })
+    });
+    if (!res.ok) throw new Error('平仓请求失败');
+    return res.json();
+  },
+
+  async toggleTrader(traderId: string, action: 'start' | 'stop'): Promise<any> {
+    const res = await fetch(`${API_BASE}/trading/toggle-trader?trader_id=${traderId}&action=${action}`, {
+      method: 'POST'
+    });
+    if (!res.ok) throw new Error('Trader控制请求失败');
+    return res.json();
+  },
+  
+  // AI学习总结相关（预留接口）
+  async generateAILearningSummary(traderId?: string): Promise<any> {
+    const url = traderId
+      ? `${API_BASE}/ai-learning/generate?trader_id=${traderId}`
+      : `${API_BASE}/ai-learning/generate`;
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || error.message || '生成AI总结失败');
+    }
+    return res.json();
+  },
+  
+  async getAILearningSummary(traderId?: string): Promise<any> {
+    const url = traderId
+      ? `${API_BASE}/ai-learning/summary?trader_id=${traderId}`
+      : `${API_BASE}/ai-learning/summary`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('获取AI总结失败');
+    return res.json();
+  },
 };

@@ -466,6 +466,11 @@ func (t *AsterTrader) GetBalance() (map[string]interface{}, error) {
 	}, nil
 }
 
+// GetAccountTrades 获取账户历史成交（Aster暂未实现）
+func (t *AsterTrader) GetAccountTrades(symbol string, limit int) ([]map[string]interface{}, error) {
+	return []map[string]interface{}{}, nil // 暂不支持
+}
+
 // GetPositions 获取持仓信息
 func (t *AsterTrader) GetPositions() ([]map[string]interface{}, error) {
 	params := make(map[string]interface{})

@@ -8,7 +8,7 @@ import { getTraderColor } from '../utils/traderColors';
 
 export function CompetitionPage() {
   const { language } = useLanguage();
-  const { data: competition } = useSWR<CompetitionData>(
+  const { data: competition, mutate: mutateCompetition } = useSWR<CompetitionData>(
     'competition',
     api.getCompetition,
     {
@@ -17,6 +17,32 @@ export function CompetitionPage() {
       dedupingInterval: 10000,
     }
   );
+
+  // Trader启用/停止处理
+  const handleToggleTrader = async (traderId: string, isPaused: boolean) => {
+    const action = isPaused ? 'start' : 'stop';
+    const actionText = isPaused ? (language === 'zh' ? '启动' : 'start') : (language === 'zh' ? '暂停' : 'stop');
+    
+    const confirmMsg = language === 'zh'
+      ? `确定要${actionText} Trader 吗？`
+      : `${actionText.charAt(0).toUpperCase() + actionText.slice(1)} trader?`;
+    
+    if (!confirm(confirmMsg)) return;
+    
+    try {
+      const result = await api.toggleTrader(traderId, action);
+      if (result.success) {
+        alert(language === 'zh' 
+          ? `✅ Trader已${actionText}！` 
+          : `✅ Trader ${actionText}ed!`);
+        mutateCompetition(); // 刷新竞赛数据
+      } else {
+        alert(language === 'zh' ? `❌ 操作失败: ${result.error}` : `❌ Failed: ${result.error}`);
+      }
+    } catch (error: any) {
+      alert(language === 'zh' ? `❌ 操作失败: ${error.message}` : `❌ Failed: ${error.message}`);
+    }
+  };
 
   if (!competition || !competition.traders) {
     return (
@@ -129,8 +155,22 @@ export function CompetitionPage() {
                       </div>
                       <div>
                         <div className="font-bold text-sm" style={{ color: '#EAECEF' }}>{trader.trader_name}</div>
-                        <div className="text-xs mono font-semibold" style={{ color: traderColor }}>
+                        <div className="text-xs mono font-semibold flex items-center gap-2" style={{ color: traderColor }}>
                           {trader.ai_model.toUpperCase()}
+                          {/* 显示运行状态标签 */}
+                          {trader.is_running && !trader.is_paused ? (
+                            <span className="text-xs px-1 py-0.5 rounded" style={{ background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }}>
+                              {language === 'zh' ? '● 运行中' : '● Running'}
+                            </span>
+                          ) : trader.is_paused ? (
+                            <span className="text-xs px-1 py-0.5 rounded" style={{ background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }}>
+                              {language === 'zh' ? '⏸ 已暂停' : '⏸ Paused'}
+                            </span>
+                          ) : (
+                            <span className="text-xs px-1 py-0.5 rounded" style={{ background: 'rgba(132, 142, 156, 0.1)', color: '#848E9C' }}>
+                              {language === 'zh' ? '⏹ 已停止' : '⏹ Stopped'}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -171,17 +211,27 @@ export function CompetitionPage() {
                         </div>
                       </div>
 
-                      {/* Status */}
+                      {/* 控制按钮 */}
                       <div>
-                        <div
-                          className="px-2 py-1 rounded text-xs font-bold"
-                          style={trader.is_running
-                            ? { background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }
-                            : { background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }
-                          }
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleToggleTrader(trader.trader_id, trader.is_paused || false);
+                          }}
+                          className="px-3 py-1.5 text-xs font-medium rounded transition-all hover:scale-105"
+                          style={!trader.is_running || trader.is_paused ? {
+                            background: 'rgba(14, 203, 129, 0.1)',
+                            color: '#0ECB81',
+                            border: '1px solid rgba(14, 203, 129, 0.2)'
+                          } : {
+                            background: 'rgba(246, 70, 93, 0.1)',
+                            color: '#F6465D',
+                            border: '1px solid rgba(246, 70, 93, 0.2)'
+                          }}
+                          title={trader.is_paused ? (language === 'zh' ? '点击启动' : 'Click to start') : (language === 'zh' ? '点击停止' : 'Click to stop')}
                         >
-                          {trader.is_running ? '●' : '○'}
-                        </div>
+                          {!trader.is_running || trader.is_paused ? '▶️ 启动' : '⏸ 停止'}
+                        </button>
                       </div>
                     </div>
                   </div>

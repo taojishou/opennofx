@@ -1,14 +1,10 @@
 package logger
 
 import (
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"math"
 	"nofx/database"
-	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -99,11 +95,6 @@ func NewDecisionLogger(logDir string) *DecisionLogger {
 		db:          db,
 		traderID:    traderID,
 	}
-}
-
-// GetDB 获取数据库连接
-func (l *DecisionLogger) GetDB() *database.DB {
-	return l.db
 }
 
 // LogDecision 记录决策（只保存到数据库）
@@ -217,39 +208,12 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 	// 转换类型：database.DecisionRecord -> logger.DecisionRecord
 	records := make([]*DecisionRecord, len(dbRecords))
 	for i, dbRec := range dbRecords {
-		// 从数据库加载该记录的所有决策动作
-		actions, err := l.db.QueryActions(dbRec.ID)
-		if err != nil {
-			log.Printf("⚠️ 加载record %d 的决策动作失败: %v", dbRec.ID, err)
-			actions = []*database.DecisionAction{} // 使用空数组
-		}
-		
-		// 转换decision actions
-		var loggerActions []DecisionAction
-		for _, act := range actions {
-			loggerActions = append(loggerActions, DecisionAction{
-				Action:      act.Action,
-				Symbol:      act.Symbol,
-				Quantity:    act.Quantity,
-				Leverage:    act.Leverage,
-				Price:       act.Price,
-				OrderID:     act.OrderID,
-				Timestamp:   act.Timestamp,
-				Success:     act.Success,
-				Error:       act.Error,
-				WasStopLoss: act.WasStopLoss,
-			})
-		}
-		
 		records[i] = &DecisionRecord{
 			Timestamp:    dbRec.Timestamp,
 			CycleNumber:  dbRec.CycleNumber,
 			InputPrompt:  dbRec.InputPrompt,
 			CoTTrace:     dbRec.CoTTrace,
 			DecisionJSON: dbRec.DecisionJSON,
-			Success:      dbRec.Success,
-			ErrorMessage: dbRec.ErrorMessage,
-			Decisions:    loggerActions, // 加载关联的决策动作
 			AccountState: AccountSnapshot{
 				TotalBalance:          dbRec.TotalBalance,
 				AvailableBalance:      dbRec.AvailableBalance,
@@ -590,18 +554,10 @@ func (l *DecisionLogger) analyzePerformanceFromDB(lookbackCycles int) (*Performa
 		}
 	}
 
-	// 只保留最近10笔交易（数据库已DESC排序，前10条就是最新的）
+	// 只保留最近10笔交易
 	if len(analysis.RecentTrades) > 10 {
 		analysis.RecentTrades = analysis.RecentTrades[:10]
 	}
-	
-	// 确保最新的在最前面（虽然数据库已经DESC，但这里再确认一下）
-	log.Printf("✓ 返回最近%d笔交易（最新ID: %d）", len(analysis.RecentTrades), func() int64 {
-		if len(dbTrades) > 0 {
-			return dbTrades[0].ID
-		}
-		return 0
-	}())
 
 	// 从数据库获取最近的决策记录，计算夏普比率
 	records, err := l.db.GetLatestRecords(lookbackCycles)

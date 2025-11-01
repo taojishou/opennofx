@@ -39,6 +39,8 @@ export interface Position {
   unrealized_pnl_pct: number;
   liquidation_price: number;
   margin_used: number;
+  open_time?: string;  // 开仓时间 ISO格式
+  holding_minutes?: number;  // 持仓分钟数
 }
 
 export interface DecisionAction {
@@ -95,6 +97,7 @@ export interface CompetitionTraderData {
   trader_id: string;
   trader_name: string;
   ai_model: string;
+  exchange: string;
   total_equity: number;
   total_pnl: number;
   total_pnl_pct: number;
@@ -102,6 +105,7 @@ export interface CompetitionTraderData {
   margin_used_pct: number;
   call_count: number;
   is_running: boolean;
+  is_paused?: boolean;
 }
 
 export interface CompetitionData {

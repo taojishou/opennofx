@@ -1,0 +1,44 @@
+package api
+
+import (
+	"log"
+	"nofx/config"
+
+	"github.com/gin-gonic/gin"
+)
+
+// handleReloadConfig 热重载配置
+func (s *Server) handleReloadConfig(c *gin.Context) {
+	log.Println("🔄 收到热重载请求...")
+
+	// 1. 重新读取config.json
+	newConfig, err := config.LoadConfig(config.GetConfigFilePath())
+	if err != nil {
+		log.Printf("❌ 加载配置失败: %v\n", err)
+		c.JSON(500, gin.H{
+			"success": false,
+			"error":   "加载配置文件失败: " + err.Error(),
+		})
+		return
+	}
+
+	// 2. 调用TraderManager的ReloadConfig方法
+	err = s.traderManager.ReloadConfig(newConfig)
+	if err != nil {
+		log.Printf("❌ 热重载失败: %v\n", err)
+		c.JSON(500, gin.H{
+			"success": false,
+			"error":   "热重载失败: " + err.Error(),
+		})
+		return
+	}
+
+	log.Println("✅ 热重载成功")
+
+	// 3. 返回成功响应
+	c.JSON(200, gin.H{
+		"success": true,
+		"message": "配置已热重载，无需重启服务",
+		"traders": len(newConfig.Traders),
+	})
+}

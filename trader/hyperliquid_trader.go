@@ -121,6 +121,11 @@ func (t *HyperliquidTrader) GetBalance() (map[string]interface{}, error) {
 	return result, nil
 }
 
+// GetAccountTrades 获取账户历史成交（Hyperliquid暂未实现）
+func (t *HyperliquidTrader) GetAccountTrades(symbol string, limit int) ([]map[string]interface{}, error) {
+	return []map[string]interface{}{}, nil // 暂不支持
+}
+
 // GetPositions 获取所有持仓
 func (t *HyperliquidTrader) GetPositions() ([]map[string]interface{}, error) {
 	// 获取账户状态

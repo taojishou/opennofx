@@ -4,6 +4,7 @@ import { api } from './lib/api';
 import { EquityChart } from './components/EquityChart';
 import { CompetitionPage } from './components/CompetitionPage';
 import AILearning from './components/AILearning';
+import ConfigManagement from './components/ConfigManagement';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { t, type Language } from './i18n/translations';
 import type {
@@ -15,7 +16,7 @@ import type {
   TraderInfo,
 } from './types';
 
-type Page = 'competition' | 'trader';
+type Page = 'competition' | 'trader' | 'settings';
 
 function App() {
   const { language, setLanguage } = useLanguage();
@@ -29,6 +30,7 @@ function App() {
   const [currentPage, setCurrentPage] = useState<Page>(getInitialPage());
   const [selectedTraderId, setSelectedTraderId] = useState<string | undefined>();
   const [lastUpdate, setLastUpdate] = useState<string>('--:--:--');
+  const [, forceUpdate] = useState(0);
 
   // 监听URL hash变化，同步页面状态
   useEffect(() => {
@@ -44,6 +46,39 @@ function App() {
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
+
+  // 每分钟更新持仓时间显示
+  useEffect(() => {
+    const timer = setInterval(() => {
+      forceUpdate(prev => prev + 1);
+    }, 60000); // 每60秒更新一次
+    
+    return () => clearInterval(timer);
+  }, []);
+
+  // 手动平仓处理
+  const handleClosePosition = async (traderId: string, symbol: string, side: string) => {
+    const confirmMsg = language === 'zh' 
+      ? `确定要平仓 ${symbol} ${side.toUpperCase()} 吗？`
+      : `Close ${symbol} ${side.toUpperCase()} position?`;
+    
+    if (!confirm(confirmMsg)) return;
+    
+    try {
+      const result = await api.closePosition(traderId, symbol, side);
+      if (result.success) {
+        alert(language === 'zh' ? '✅ 平仓成功！' : '✅ Position closed successfully!');
+        // 立即刷新相关数据
+        mutatePositions();
+        mutateAccount();
+        mutateStatus();
+      } else {
+        alert(language === 'zh' ? `❌ 平仓失败: ${result.error}` : `❌ Failed: ${result.error}`);
+      }
+    } catch (error: any) {
+      alert(language === 'zh' ? `❌ 平仓失败: ${error.message}` : `❌ Failed: ${error.message}`);
+    }
+  };
 
   // 切换页面时更新URL hash
   const navigateToPage = (page: Page) => {
@@ -64,7 +99,7 @@ function App() {
   }, [traders, selectedTraderId]);
 
   // 如果在trader页面，获取该trader的数据
-  const { data: status } = useSWR<SystemStatus>(
+  const { data: status, mutate: mutateStatus } = useSWR<SystemStatus>(
     currentPage === 'trader' && selectedTraderId
       ? `status-${selectedTraderId}`
       : null,
@@ -76,27 +111,27 @@ function App() {
     }
   );
 
-  const { data: account } = useSWR<AccountInfo>(
+  const { data: account, mutate: mutateAccount } = useSWR<AccountInfo>(
     currentPage === 'trader' && selectedTraderId
       ? `account-${selectedTraderId}`
       : null,
     () => api.getAccount(selectedTraderId),
     {
-      refreshInterval: 15000, // 15秒刷新（配合后端15秒缓存）
-      revalidateOnFocus: false, // 禁用聚焦时重新验证，减少请求
-      dedupingInterval: 10000, // 10秒去重，防止短时间内重复请求
+      refreshInterval: 5000, // 5秒刷新（更频繁）
+      revalidateOnFocus: true, // 切换回标签页时自动刷新
+      dedupingInterval: 3000, // 3秒去重
     }
   );
 
-  const { data: positions } = useSWR<Position[]>(
+  const { data: positions, mutate: mutatePositions } = useSWR<Position[]>(
     currentPage === 'trader' && selectedTraderId
       ? `positions-${selectedTraderId}`
       : null,
     () => api.getPositions(selectedTraderId),
     {
-      refreshInterval: 15000, // 15秒刷新（配合后端15秒缓存）
-      revalidateOnFocus: false, // 禁用聚焦时重新验证，减少请求
-      dedupingInterval: 10000, // 10秒去重，防止短时间内重复请求
+      refreshInterval: 5000, // 5秒刷新（更频繁）
+      revalidateOnFocus: true, // 切换回标签页时自动刷新
+      dedupingInterval: 3000, // 3秒去重
     }
   );
 
@@ -227,6 +262,16 @@ function App() {
                 >
                   {t('details', language)}
                 </button>
+                <button
+                  onClick={() => navigateToPage('settings')}
+                  className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
+                  style={currentPage === 'settings'
+                    ? { background: '#F0B90B', color: '#000' }
+                    : { background: 'transparent', color: '#848E9C' }
+                  }
+                >
+                  ⚙️
+                </button>
               </div>
 
               {/* Trader Selector (only show on trader page) */}
@@ -272,9 +317,12 @@ function App() {
       <main className="max-w-[1920px] mx-auto px-6 py-6">
         {currentPage === 'competition' ? (
           <CompetitionPage />
+        ) : currentPage === 'settings' ? (
+          <ConfigManagement />
         ) : (
           <TraderDetailsPage
             selectedTrader={selectedTrader}
+            selectedTraderId={selectedTraderId}
             status={status}
             account={account}
             positions={positions}
@@ -282,6 +330,7 @@ function App() {
             stats={stats}
             lastUpdate={lastUpdate}
             language={language}
+            onClosePosition={handleClosePosition}
           />
         )}
       </main>
@@ -324,14 +373,17 @@ function App() {
 // Trader Details Page Component
 function TraderDetailsPage({
   selectedTrader,
+  selectedTraderId,
   status,
   account,
   positions,
   decisions,
   lastUpdate,
   language,
+  onClosePosition,
 }: {
   selectedTrader?: TraderInfo;
+  selectedTraderId?: string;
   status?: SystemStatus;
   account?: AccountInfo;
   positions?: Position[];
@@ -339,7 +391,11 @@ function TraderDetailsPage({
   stats?: Statistics;
   lastUpdate: string;
   language: Language;
+  onClosePosition?: (traderId: string, symbol: string, side: string) => void;
 }) {
+  // 标签页状态
+  const [activeTab, setActiveTab] = useState<'overview' | 'learning'>('overview');
+
   if (!selectedTrader) {
     return (
       <div className="space-y-6">
@@ -428,6 +484,35 @@ function TraderDetailsPage({
         />
       </div>
 
+      {/* 标签页导航 */}
+      <div className="mb-6">
+        <div className="flex gap-2 rounded-xl p-1" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <button
+            onClick={() => setActiveTab('overview')}
+            className="flex-1 px-6 py-3 rounded-lg font-bold transition-all"
+            style={activeTab === 'overview'
+              ? { background: 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)', color: '#000', boxShadow: '0 4px 12px rgba(240, 185, 11, 0.3)' }
+              : { background: 'transparent', color: '#848E9C' }
+            }
+          >
+            📊 {language === 'zh' ? '账户概览' : 'Overview'}
+          </button>
+          <button
+            onClick={() => setActiveTab('learning')}
+            className="flex-1 px-6 py-3 rounded-lg font-bold transition-all"
+            style={activeTab === 'learning'
+              ? { background: 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)', color: '#000', boxShadow: '0 4px 12px rgba(240, 185, 11, 0.3)' }
+              : { background: 'transparent', color: '#848E9C' }
+            }
+          >
+            🧠 {language === 'zh' ? 'AI学习与反思' : 'AI Learning'}
+          </button>
+        </div>
+      </div>
+
+      {/* 标签页内容 - 概览 */}
+      {activeTab === 'overview' && (
+        <>
       {/* 主要内容区：左右分屏 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         {/* 左侧：图表 + 持仓 */}
@@ -451,52 +536,107 @@ function TraderDetailsPage({
         </div>
         {positions && positions.length > 0 ? (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className="w-full text-xs">
               <thead className="text-left border-b border-gray-800">
                 <tr>
-                  <th className="pb-3 font-semibold text-gray-400">{t('symbol', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('side', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('entryPrice', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('markPrice', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('quantity', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('positionValue', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('leverage', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('unrealizedPnL', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('liqPrice', language)}</th>
+                  <th className="pb-2 font-semibold text-gray-400 text-xs">{t('symbol', language)}</th>
+                  <th className="pb-2 font-semibold text-gray-400 text-xs">{t('side', language)}</th>
+                  <th className="pb-2 font-semibold text-gray-400 text-xs">{language === 'zh' ? '价格' : 'Price'}</th>
+                  <th className="pb-2 font-semibold text-gray-400 text-xs">{t('quantity', language)}</th>
+                  <th className="pb-2 font-semibold text-gray-400 text-xs">{t('leverage', language)}</th>
+                  <th className="pb-2 font-semibold text-gray-400 text-xs">{t('unrealizedPnL', language)}</th>
+                  <th className="pb-2 font-semibold text-gray-400 text-xs">{language === 'zh' ? '持仓' : 'Holding'}</th>
+                  <th className="pb-2 font-semibold text-gray-400 text-xs">{t('liqPrice', language)}</th>
+                  <th className="pb-2 text-center font-semibold text-gray-400 text-xs">{language === 'zh' ? '操作' : 'Action'}</th>
                 </tr>
               </thead>
               <tbody>
                 {positions.map((pos, i) => (
                   <tr key={i} className="border-b border-gray-800 last:border-0">
-                    <td className="py-3 font-mono font-semibold">{pos.symbol}</td>
-                    <td className="py-3">
+                    <td className="py-2 font-mono font-semibold" style={{ color: '#EAECEF' }}>
+                      {pos.symbol.replace('USDT', '')}
+                    </td>
+                    <td className="py-2">
                       <span
-                        className="px-2 py-1 rounded text-xs font-bold"
+                        className="px-1.5 py-0.5 rounded text-xs font-bold"
                         style={pos.side === 'long'
                           ? { background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }
                           : { background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }
                         }
                       >
-                        {t(pos.side === 'long' ? 'long' : 'short', language)}
+                        {pos.side === 'long' ? (language === 'zh' ? '多' : 'L') : (language === 'zh' ? '空' : 'S')}
                       </span>
                     </td>
-                    <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.entry_price.toFixed(4)}</td>
-                    <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.mark_price.toFixed(4)}</td>
-                    <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.quantity.toFixed(4)}</td>
-                    <td className="py-3 font-mono font-bold" style={{ color: '#EAECEF' }}>
-                      {(pos.quantity * pos.mark_price).toFixed(2)} USDT
+                    <td className="py-2 font-mono text-xs">
+                      <div style={{ color: '#848E9C' }}>{pos.entry_price.toFixed(4)}</div>
+                      <div style={{ color: '#EAECEF', fontWeight: 600 }}>{pos.mark_price.toFixed(4)}</div>
                     </td>
-                    <td className="py-3 font-mono" style={{ color: '#F0B90B' }}>{pos.leverage}x</td>
-                    <td className="py-3 font-mono">
-                      <span
-                        style={{ color: pos.unrealized_pnl >= 0 ? '#0ECB81' : '#F6465D', fontWeight: 'bold' }}
+                    <td className="py-2 font-mono text-xs" style={{ color: '#EAECEF' }}>
+                      {pos.quantity.toFixed(3)}
+                    </td>
+                    <td className="py-2 font-mono text-xs" style={{ color: '#F0B90B' }}>{pos.leverage}x</td>
+                    <td className="py-2 font-mono text-xs">
+                      <div style={{ color: pos.unrealized_pnl >= 0 ? '#0ECB81' : '#F6465D', fontWeight: 'bold' }}>
+                        {pos.unrealized_pnl >= 0 ? '+' : ''}{pos.unrealized_pnl.toFixed(2)}
+                      </div>
+                      <div style={{ color: pos.unrealized_pnl >= 0 ? '#0ECB81' : '#F6465D', fontSize: '10px' }}>
+                        {pos.unrealized_pnl_pct >= 0 ? '+' : ''}{pos.unrealized_pnl_pct.toFixed(1)}%
+                      </div>
+                    </td>
+                    <td className="py-2 font-mono text-xs">
+                      {(() => {
+                        // 实时计算持仓时长
+                        let minutes = pos.holding_minutes || 0;
+                        if (pos.open_time) {
+                          const openTime = new Date(pos.open_time).getTime();
+                          const now = Date.now();
+                          minutes = Math.floor((now - openTime) / 60000);
+                        }
+                        
+                        return minutes > 0 ? (
+                          <div style={{
+                            color: minutes < 30 ? '#F6465D' :
+                                   minutes < 45 ? '#F0B90B' :
+                                   minutes <= 60 ? '#0ECB81' : '#A78BFA',
+                            fontWeight: 'bold'
+                          }}>
+                            {minutes < 60 
+                              ? `${Math.floor(minutes)}${language === 'zh' ? '分' : 'm'}`
+                              : `${Math.floor(minutes / 60)}h${Math.floor(minutes % 60)}m`
+                            }
+                            {minutes < 30 && ' ⚠️'}
+                            {minutes >= 45 && minutes <= 60 && ' ✅'}
+                          </div>
+                        ) : (
+                          <span style={{ color: '#848E9C' }}>-</span>
+                        );
+                      })()}
+                    </td>
+                    <td className="py-2 font-mono text-xs" style={{ color: '#848E9C' }}>
+                      {pos.liquidation_price.toFixed(2)}
+                    </td>
+                    <td className="py-2 text-center">
+                      {onClosePosition && selectedTraderId && (
+                        <button
+                          onClick={() => onClosePosition(selectedTraderId, pos.symbol, pos.side)}
+                        className="px-2 py-1 text-xs font-medium rounded transition-all hover:scale-105"
+                        style={{
+                          background: 'rgba(246, 70, 93, 0.1)',
+                          color: '#F6465D',
+                          border: '1px solid rgba(246, 70, 93, 0.2)',
+                          fontSize: '11px'
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(246, 70, 93, 0.2)';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'rgba(246, 70, 93, 0.1)';
+                        }}
+                        title={language === 'zh' ? '手动平仓' : 'Close Position'}
                       >
-                        {pos.unrealized_pnl >= 0 ? '+' : ''}
-                        {pos.unrealized_pnl.toFixed(2)} ({pos.unrealized_pnl_pct.toFixed(2)}%)
-                      </span>
-                    </td>
-                    <td className="py-3 font-mono" style={{ color: '#848E9C' }}>
-                      {pos.liquidation_price.toFixed(4)}
+                          {language === 'zh' ? '平仓' : 'Close'}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -552,10 +692,15 @@ function TraderDetailsPage({
         {/* 右侧结束 */}
       </div>
 
-      {/* AI Learning & Performance Analysis */}
-      <div className="mb-6 animate-slide-in" style={{ animationDelay: '0.3s' }}>
-        <AILearning traderId={selectedTrader.trader_id} />
-      </div>
+        </>
+      )}
+
+      {/* 标签页内容 - AI学习 */}
+      {activeTab === 'learning' && (
+        <div className="mb-6 animate-slide-in">
+          <AILearning traderId={selectedTrader.trader_id} />
+        </div>
+      )}
     </div>
   );
 }
@@ -603,20 +748,56 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
     <div className="rounded p-5 transition-all duration-300 hover:translate-y-[-2px]" style={{ border: '1px solid #2B3139', background: '#1E2329', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)' }}>
       {/* Header */}
       <div className="flex items-start justify-between mb-3">
-        <div>
-          <div className="font-semibold" style={{ color: '#EAECEF' }}>{t('cycle', language)} #{decision.cycle_number}</div>
+        <div className="flex-1">
+          <div className="flex items-center gap-2 mb-1">
+            <div className="font-semibold" style={{ color: '#EAECEF' }}>{t('cycle', language)} #{decision.cycle_number}</div>
+            <div
+              className="px-2 py-0.5 rounded text-xs font-bold"
+              style={decision.success
+                ? { background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }
+                : { background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }
+              }
+            >
+              {t(decision.success ? 'success' : 'failed', language)}
+            </div>
+          </div>
           <div className="text-xs" style={{ color: '#848E9C' }}>
             {new Date(decision.timestamp).toLocaleString()}
           </div>
         </div>
-        <div
-          className="px-3 py-1 rounded text-xs font-bold"
-          style={decision.success
-            ? { background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }
-            : { background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }
-          }
-        >
-          {t(decision.success ? 'success' : 'failed', language)}
+        
+        {/* 实际决策动作展示 */}
+        <div className="flex flex-col gap-1 items-end">
+          {decision.decisions && decision.decisions.length > 0 ? (
+            decision.decisions.slice(0, 3).map((action, idx) => (
+              <div key={idx} className="flex items-center gap-1.5">
+                <span className="text-xs font-mono font-bold" style={{ color: '#EAECEF' }}>
+                  {action.symbol.replace('USDT', '')}
+                </span>
+                <span
+                  className="px-2 py-0.5 rounded text-xs font-bold uppercase"
+                  style={
+                    action.action.includes('open_long') ? { background: 'rgba(14, 203, 129, 0.15)', color: '#0ECB81' } :
+                    action.action.includes('open_short') ? { background: 'rgba(246, 70, 93, 0.15)', color: '#F6465D' } :
+                    action.action.includes('close') ? { background: 'rgba(240, 185, 11, 0.15)', color: '#F0B90B' } :
+                    action.action === 'hold' ? { background: 'rgba(96, 165, 250, 0.15)', color: '#60a5fa' } :
+                    { background: 'rgba(132, 142, 156, 0.15)', color: '#848E9C' }
+                  }
+                >
+                  {action.action.replace('_', ' ')}
+                </span>
+              </div>
+            ))
+          ) : (
+            <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'rgba(132, 142, 156, 0.1)', color: '#848E9C' }}>
+              {language === 'zh' ? '无操作' : 'No Action'}
+            </span>
+          )}
+          {decision.decisions && decision.decisions.length > 3 && (
+            <span className="text-xs" style={{ color: '#848E9C' }}>
+              +{decision.decisions.length - 3} {language === 'zh' ? '更多' : 'more'}
+            </span>
+          )}
         </div>
       </div>
 
