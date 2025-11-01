@@ -145,9 +145,9 @@ export default function ConfigManagement() {
         // 尝试热重载
         const reloaded = await reloadConfig();
         if (reloaded) {
-          alert('✅ ' + data.message + '\n🔄 配置已热重载，无需重启服务！');
+          alert('✅ ' + data.message + '\n🔄 配置已热重载生效！');
         } else {
-          alert('✅ ' + data.message + '\n⚠️ 请重启服务使配置生效');
+          alert('✅ ' + data.message);
         }
         loadConfig(); // 重新加载配置
       } else {
@@ -173,9 +173,9 @@ export default function ConfigManagement() {
       if (data.success) {
         const reloaded = await reloadConfig();
         if (reloaded) {
-          alert('✅ ' + data.message + '\n🔄 配置已热重载，无需重启服务！');
+          alert('✅ ' + data.message + '\n🔄 配置已热重载生效！');
         } else {
-          alert('✅ ' + data.message + '\n⚠️ 请重启服务使配置生效');
+          alert('✅ ' + data.message);
         }
         setEditingTrader(null);
         loadConfig();
@@ -202,9 +202,9 @@ export default function ConfigManagement() {
       if (data.success) {
         const reloaded = await reloadConfig();
         if (reloaded) {
-          alert('✅ ' + data.message + '\n🔄 新Trader已自动启动，无需重启服务！');
+          alert('✅ ' + data.message + '\n🔄 配置已热重载生效！');
         } else {
-          alert('✅ ' + data.message + '\n⚠️ 请重启服务使Trader生效');
+          alert('✅ ' + data.message);
         }
         setShowAddTrader(false);
         setTraderForm({});
@@ -232,9 +232,9 @@ export default function ConfigManagement() {
       if (data.success) {
         const reloaded = await reloadConfig();
         if (reloaded) {
-          alert('✅ ' + data.message + '\n🔄 Trader已停止并删除，无需重启服务！');
+          alert('✅ ' + data.message + '\n🔄 配置已热重载生效！');
         } else {
-          alert('✅ ' + data.message + '\n⚠️ 请重启服务使删除生效');
+          alert('✅ ' + data.message);
         }
         loadConfig();
       } else {
@@ -618,24 +618,29 @@ export default function ConfigManagement() {
                           type="number"
                           min="5"
                           max="200"
-                          value={kline.limit}
+                          value={kline.limit || ''}
                           onChange={(e) => {
                             const val = e.target.value;
-                            // 允许空值和数字输入
-                            if (val === '' || !isNaN(Number(val))) {
-                              const newKlines = [...config.market_data!.klines];
-                              newKlines[index].limit = val === '' ? 20 : parseInt(val);
-                              updateGlobalConfig({ market_data: { klines: newKlines } });
+                            const newKlines = [...config.market_data!.klines];
+                            // 允许空值或有效数字
+                            if (val === '') {
+                              newKlines[index].limit = null as any; // 临时允许空值
+                            } else {
+                              const num = parseInt(val);
+                              if (!isNaN(num)) {
+                                newKlines[index].limit = num;
+                              }
                             }
+                            updateGlobalConfig({ market_data: { klines: newKlines } });
                           }}
                           onBlur={(e) => {
                             // 失焦时确保有效值
-                            const val = parseInt(e.target.value);
-                            if (isNaN(val) || val < 5) {
+                            const val = e.target.value;
+                            if (val === '' || parseInt(val) < 5) {
                               const newKlines = [...config.market_data!.klines];
                               newKlines[index].limit = 20;
                               updateGlobalConfig({ market_data: { klines: newKlines } });
-                            } else if (val > 200) {
+                            } else if (parseInt(val) > 200) {
                               const newKlines = [...config.market_data!.klines];
                               newKlines[index].limit = 200;
                               updateGlobalConfig({ market_data: { klines: newKlines } });
