@@ -22,6 +22,8 @@ export default function PromptConfig({ traderId }: PromptConfigProps) {
   const [saving, setSaving] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [preview, setPreview] = useState('');
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newSection, setNewSection] = useState({ section_name: '', title: '', content: '', enabled: true });
 
   useEffect(() => {
     loadPrompts();
@@ -101,6 +103,58 @@ export default function PromptConfig({ traderId }: PromptConfigProps) {
     setEditContent('');
   };
 
+  const handleAdd = async () => {
+    if (!newSection.section_name || !newSection.title || !newSection.content) {
+      alert('请填写完整信息');
+      return;
+    }
+
+    try {
+      setSaving(true);
+      const response = await fetch(`/api/prompts/add?trader_id=${traderId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newSection),
+      });
+      const data = await response.json();
+      if (data.success) {
+        await loadPrompts();
+        setShowAddForm(false);
+        setNewSection({ section_name: '', title: '', content: '', enabled: true });
+        alert('添加成功！');
+      } else {
+        alert('添加失败: ' + (data.error || '未知错误'));
+      }
+    } catch (error) {
+      console.error('添加失败:', error);
+      alert('添加失败，请重试');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (sectionName: string) => {
+    if (!confirm(`确定要删除 "${sectionName}" 吗？此操作不可撤销！`)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/prompts/delete?trader_id=${traderId}&section_name=${sectionName}`, {
+        method: 'DELETE',
+      });
+      const data = await response.json();
+      if (data.success) {
+        await loadPrompts();
+        alert('删除成功！');
+      } else {
+        alert('删除失败: ' + (data.error || '未知错误'));
+      }
+    } catch (error) {
+      console.error('删除失败:', error);
+      alert('删除失败，请重试');
+    }
+  };
+
   const handlePreview = async () => {
     try {
       const response = await fetch(`/api/prompts/preview?trader_id=${traderId}`);
@@ -156,19 +210,130 @@ export default function PromptConfig({ traderId }: PromptConfigProps) {
               </p>
             </div>
           </div>
-          <button
-            onClick={handlePreview}
-            className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
-            style={{
-              background: 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)',
-              color: '#1E2329',
-              boxShadow: '0 4px 16px rgba(240, 185, 11, 0.3)'
-            }}
-          >
-            👁️ 预览完整Prompt
-          </button>
+          <div className="flex gap-3">
+            <button
+              onClick={() => setShowAddForm(!showAddForm)}
+              className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
+              style={{
+                background: 'linear-gradient(135deg, #10B981 0%, #0ECB81 100%)',
+                color: '#FFFFFF',
+                boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)'
+              }}
+            >
+              ➕ 新增Prompt
+            </button>
+            <button
+              onClick={handlePreview}
+              className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
+              style={{
+                background: 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)',
+                color: '#1E2329',
+                boxShadow: '0 4px 16px rgba(240, 185, 11, 0.3)'
+              }}
+            >
+              👁️ 预览完整Prompt
+            </button>
+          </div>
         </div>
       </div>
+
+      {/* 新增Prompt表单 */}
+      {showAddForm && (
+        <div className="rounded-2xl p-6" style={{
+          background: 'rgba(30, 35, 41, 0.8)',
+          border: '1px solid rgba(139, 92, 246, 0.3)',
+          boxShadow: '0 4px 16px rgba(139, 92, 246, 0.1)'
+        }}>
+          <h3 className="text-xl font-bold mb-4" style={{ color: '#EAECEF' }}>
+            ➕ 新增Prompt Section
+          </h3>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
+                Section Name (英文标识，唯一)
+              </label>
+              <input
+                type="text"
+                value={newSection.section_name}
+                onChange={(e) => setNewSection({ ...newSection, section_name: e.target.value })}
+                placeholder="例如: my_custom_rule"
+                className="w-full rounded-xl p-3"
+                style={{
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  border: '1px solid rgba(139, 92, 246, 0.3)',
+                  color: '#EAECEF',
+                  outline: 'none'
+                }}
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
+                标题 (可包含emoji)
+              </label>
+              <input
+                type="text"
+                value={newSection.title}
+                onChange={(e) => setNewSection({ ...newSection, title: e.target.value })}
+                placeholder="例如: 🎯 我的自定义规则"
+                className="w-full rounded-xl p-3"
+                style={{
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  border: '1px solid rgba(139, 92, 246, 0.3)',
+                  color: '#EAECEF',
+                  outline: 'none'
+                }}
+              />
+            </div>
+            <div>
+              <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
+                内容 (Markdown格式)
+              </label>
+              <textarea
+                value={newSection.content}
+                onChange={(e) => setNewSection({ ...newSection, content: e.target.value })}
+                rows={10}
+                placeholder="输入Prompt内容..."
+                className="w-full rounded-xl p-4 font-mono text-sm leading-relaxed resize-y"
+                style={{
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  border: '1px solid rgba(139, 92, 246, 0.3)',
+                  color: '#E0E7FF',
+                  outline: 'none'
+                }}
+              />
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleAdd}
+                disabled={saving}
+                className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105 disabled:opacity-50"
+                style={{
+                  background: 'linear-gradient(135deg, #10B981 0%, #0ECB81 100%)',
+                  color: '#FFFFFF',
+                  boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)'
+                }}
+              >
+                {saving ? '⏳ 添加中...' : '✅ 确认添加'}
+              </button>
+              <button
+                onClick={() => {
+                  setShowAddForm(false);
+                  setNewSection({ section_name: '', title: '', content: '', enabled: true });
+                }}
+                disabled={saving}
+                className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105 disabled:opacity-50"
+                style={{
+                  background: 'rgba(248, 113, 113, 0.2)',
+                  color: '#FCA5A5',
+                  border: '1px solid rgba(248, 113, 113, 0.3)'
+                }}
+              >
+                ❌ 取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Prompt部分列表 */}
       <div className="space-y-4">
@@ -217,17 +382,30 @@ export default function PromptConfig({ traderId }: PromptConfigProps) {
                       </span>
                     </label>
                     {!isEditing ? (
-                      <button
-                        onClick={() => handleEdit(section)}
-                        className="px-4 py-2 rounded-lg font-semibold transition-all hover:scale-105"
-                        style={{
-                          background: 'rgba(139, 92, 246, 0.2)',
-                          color: '#A78BFA',
-                          border: '1px solid rgba(139, 92, 246, 0.3)'
-                        }}
-                      >
-                        ✏️ 编辑
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleEdit(section)}
+                          className="px-4 py-2 rounded-lg font-semibold transition-all hover:scale-105"
+                          style={{
+                            background: 'rgba(139, 92, 246, 0.2)',
+                            color: '#A78BFA',
+                            border: '1px solid rgba(139, 92, 246, 0.3)'
+                          }}
+                        >
+                          ✏️ 编辑
+                        </button>
+                        <button
+                          onClick={() => handleDelete(section.section_name)}
+                          className="px-4 py-2 rounded-lg font-semibold transition-all hover:scale-105"
+                          style={{
+                            background: 'rgba(248, 113, 113, 0.2)',
+                            color: '#FCA5A5',
+                            border: '1px solid rgba(248, 113, 113, 0.3)'
+                          }}
+                        >
+                          🗑️ 删除
+                        </button>
+                      </div>
                     ) : null}
                   </div>
                 </div>

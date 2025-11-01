@@ -360,6 +360,7 @@ func (at *AutoTrader) runCycle() error {
 
 	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
 	if decision != nil {
+		record.SystemPrompt = decision.SystemPrompt
 		record.InputPrompt = decision.UserPrompt
 		record.CoTTrace = decision.CoTTrace
 		if len(decision.Decisions) > 0 {
@@ -676,7 +677,8 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, []logger.Decisio
 		BTCETHLeverage:    at.config.BTCETHLeverage,  // 使用配置的杠杆倍数
 		AltcoinLeverage:   at.config.AltcoinLeverage, // 使用配置的杠杆倍数
 		MaxPositions:      at.config.MaxPositions,    // 使用配置的最大持仓数
-		AILearningSummary: aiLearningSummary,         // 添加AI学习总结
+		AILearningSummary: aiLearningSummary, // 添加AI学习总结
+		DecisionLogger:    at.decisionLogger, // 传递DecisionLogger用于访问数据库
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,

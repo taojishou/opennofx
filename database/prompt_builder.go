@@ -1,14 +1,13 @@
-package api
+package database
 
 import (
 	"fmt"
 	"log"
-	"nofx/database"
 	"strings"
 )
 
 // BuildSystemPromptFromDB 从数据库构建system prompt
-func BuildSystemPromptFromDB(db *database.DB, accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
+func (db *DB) BuildSystemPromptFromDB(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
 	configs, err := db.GetEnabledPromptConfigs()
 	if err != nil {
 		log.Printf("⚠️ 获取prompt配置失败: %v", err)
@@ -35,6 +34,21 @@ func BuildSystemPromptFromDB(db *database.DB, accountEquity float64, btcEthLever
 		result.WriteString("\n\n")
 	}
 
+	// 添加输出格式要求（关键！）
+	result.WriteString("---\n\n")
+	result.WriteString("# 📤 输出格式\n\n")
+	result.WriteString("**第一步: 思维链（纯文本）**\n")
+	result.WriteString("简洁分析你的思考过程\n\n")
+	result.WriteString("**第二步: JSON决策数组**\n\n")
+	result.WriteString("```json\n[\n")
+	result.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage, accountEquity*5))
+	result.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\", \"reasoning\": \"止盈离场\"}\n")
+	result.WriteString("]\n```\n\n")
+	result.WriteString("**字段说明**:\n")
+	result.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait\n")
+	result.WriteString("- `confidence`: 0-100（开仓建议≥75）\n")
+	result.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n\n")
+	
 	// 添加提醒
 	result.WriteString("---\n\n")
 	result.WriteString("**记住**: \n")

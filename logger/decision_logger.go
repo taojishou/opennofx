@@ -16,7 +16,8 @@ import (
 type DecisionRecord struct {
 	Timestamp      time.Time          `json:"timestamp"`       // 决策时间
 	CycleNumber    int                `json:"cycle_number"`    // 周期编号
-	InputPrompt    string             `json:"input_prompt"`    // 发送给AI的输入prompt
+	SystemPrompt   string             `json:"system_prompt"`   // System Prompt（规则）
+	InputPrompt    string             `json:"input_prompt"`    // User Prompt（市场数据）
 	CoTTrace       string             `json:"cot_trace"`       // AI思维链（输出）
 	DecisionJSON   string             `json:"decision_json"`   // 决策JSON
 	AccountState   AccountSnapshot    `json:"account_state"`   // 账户状态快照
@@ -138,6 +139,7 @@ func (l *DecisionLogger) saveToDatabase(record *DecisionRecord) error {
 		TraderID:              l.traderID,
 		CycleNumber:           record.CycleNumber,
 		Timestamp:             record.Timestamp,
+		SystemPrompt:          record.SystemPrompt,
 		InputPrompt:           record.InputPrompt,
 		CoTTrace:              record.CoTTrace,
 		DecisionJSON:          decisionJSON,

@@ -82,6 +82,8 @@ func (s *Server) setupRoutes() {
 		api.GET("/prompts", s.handleGetPrompts)
 		api.POST("/prompts/update", s.handleUpdatePrompt)
 		api.POST("/prompts/toggle", s.handleTogglePrompt)
+		api.POST("/prompts/add", s.handleAddPrompt)
+		api.DELETE("/prompts/delete", s.handleDeletePrompt)
 		api.GET("/prompts/preview", s.handlePreviewPrompt)
 
 		// 系统配置管理路由
@@ -609,7 +611,7 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 	btcLeverage := 3
 	altLeverage := 10
 
-	prompt := BuildSystemPromptFromDB(db, accountEquity, btcLeverage, altLeverage)
+	prompt := db.BuildSystemPromptFromDB(accountEquity, btcLeverage, altLeverage)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -645,4 +647,125 @@ func (s *Server) Start() error {
 	log.Println()
 
 	return s.router.Run(addr)
+}
+
+// handleAddPrompt 添加新的prompt配置
+func (s *Server) handleAddPrompt(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	var req struct {
+		SectionName  string `json:"section_name"`
+		Title        string `json:"title"`
+		Content      string `json:"content"`
+		Enabled      bool   `json:"enabled"`
+		DisplayOrder int    `json:"display_order"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	if req.SectionName == "" || req.Title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "section_name and title are required"})
+		return
+	}
+
+	db := trader.GetDecisionLogger().GetDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库未初始化"})
+		return
+	}
+
+	// 检查是否已存在
+	existing, _ := db.GetAllPromptConfigs()
+	for _, cfg := range existing {
+		if cfg.SectionName == req.SectionName {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "该section_name已存在"})
+			return
+		}
+	}
+
+	// 如果没有指定display_order，使用最大值+1
+	if req.DisplayOrder == 0 {
+		maxOrder := 0
+		for _, cfg := range existing {
+			if cfg.DisplayOrder > maxOrder {
+				maxOrder = cfg.DisplayOrder
+			}
+		}
+		req.DisplayOrder = maxOrder + 1
+	}
+
+	// 插入新配置
+	cfg := db.NewPromptConfig(req.SectionName, req.Title, req.Content, req.Enabled, req.DisplayOrder)
+	if err := db.AddPromptConfig(cfg); err != nil {
+		log.Printf("添加prompt配置失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "添加配置失败"})
+		return
+	}
+
+	log.Printf("✓ 新增Prompt配置: %s - %s", req.SectionName, req.Title)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "添加成功",
+	})
+}
+
+// handleDeletePrompt 删除prompt配置
+func (s *Server) handleDeletePrompt(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	sectionName := c.Query("section_name")
+	if sectionName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "section_name is required"})
+		return
+	}
+
+	db := trader.GetDecisionLogger().GetDB()
+	if db == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "数据库未初始化"})
+		return
+	}
+
+	// 删除配置
+	rows, err := db.DeletePromptConfig(sectionName)
+	if err != nil {
+		log.Printf("删除prompt配置失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除配置失败"})
+		return
+	}
+
+	if rows == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "配置不存在"})
+		return
+	}
+
+	log.Printf("✓ 删除Prompt配置: %s", sectionName)
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "删除成功",
+	})
 }

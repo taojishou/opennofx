@@ -78,6 +78,7 @@ func (db *DB) initTables() error {
 		trader_id TEXT NOT NULL,
 		cycle_number INTEGER NOT NULL,
 		timestamp DATETIME NOT NULL,
+		system_prompt TEXT,
 		input_prompt TEXT,
 		cot_trace TEXT,
 		decision_json TEXT,
@@ -219,11 +220,12 @@ func (db *DB) Close() error {
 // DecisionRecord 决策记录结构（数据库版本）
 type DecisionRecord struct {
 	ID           int64
-	TraderID     string
-	CycleNumber  int
-	Timestamp    time.Time
-	InputPrompt  string
-	CoTTrace     string
+	TraderID      string
+	CycleNumber   int
+	Timestamp     time.Time
+	SystemPrompt  string
+	InputPrompt   string
+	CoTTrace      string
 	DecisionJSON string
 	Success      bool
 	ErrorMessage string
@@ -307,16 +309,17 @@ type TradeOutcome struct {
 func (db *DB) InsertDecisionRecord(record *DecisionRecord) (int64, error) {
 	query := `
 	INSERT INTO decision_records (
-		trader_id, cycle_number, timestamp, input_prompt, cot_trace, decision_json,
+		trader_id, cycle_number, timestamp, system_prompt, input_prompt, cot_trace, decision_json,
 		success, error_message, total_balance, available_balance, total_unrealized_profit,
 		position_count, margin_used_pct
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	result, err := db.conn.Exec(query,
 		record.TraderID,
 		record.CycleNumber,
 		record.Timestamp,
+		record.SystemPrompt,
 		record.InputPrompt,
 		record.CoTTrace,
 		record.DecisionJSON,
@@ -432,8 +435,14 @@ func (db *DB) InsertTradeOutcome(trade *TradeOutcome) error {
 // GetLatestRecords 获取最近N条决策记录
 func (db *DB) GetLatestRecords(limit int) ([]*DecisionRecord, error) {
 	query := `
-	SELECT id, trader_id, cycle_number, timestamp, input_prompt, cot_trace, decision_json,
-		success, error_message, total_balance, available_balance, total_unrealized_profit,
+	SELECT id, trader_id, cycle_number, timestamp, 
+		COALESCE(system_prompt, '') as system_prompt, 
+		COALESCE(input_prompt, '') as input_prompt, 
+		COALESCE(cot_trace, '') as cot_trace, 
+		COALESCE(decision_json, '') as decision_json,
+		success, 
+		COALESCE(error_message, '') as error_message, 
+		total_balance, available_balance, total_unrealized_profit,
 		position_count, margin_used_pct
 	FROM decision_records
 	WHERE trader_id = ?
@@ -455,6 +464,7 @@ func (db *DB) GetLatestRecords(limit int) ([]*DecisionRecord, error) {
 			&record.TraderID,
 			&record.CycleNumber,
 			&record.Timestamp,
+			&record.SystemPrompt,
 			&record.InputPrompt,
 			&record.CoTTrace,
 			&record.DecisionJSON,
@@ -902,6 +912,23 @@ func (db *DB) UpdatePromptConfig(cfg *PromptConfig) error {
 
 	_, err := db.conn.Exec(query, cfg.Title, cfg.Content, cfg.Enabled, cfg.DisplayOrder, cfg.SectionName)
 	return err
+}
+
+// AddPromptConfig 添加新的prompt配置
+func (db *DB) AddPromptConfig(cfg *PromptConfig) error {
+	query := `INSERT INTO prompt_configs (section_name, title, content, enabled, display_order) VALUES (?, ?, ?, ?, ?)`
+	_, err := db.conn.Exec(query, cfg.SectionName, cfg.Title, cfg.Content, cfg.Enabled, cfg.DisplayOrder)
+	return err
+}
+
+// DeletePromptConfig 删除prompt配置
+func (db *DB) DeletePromptConfig(sectionName string) (int64, error) {
+	query := `DELETE FROM prompt_configs WHERE section_name = ?`
+	result, err := db.conn.Exec(query, sectionName)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // SavePositionOpenTime 保存持仓开仓时间

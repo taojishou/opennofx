@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"nofx/database"
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
@@ -68,6 +69,7 @@ type Context struct {
 	AltcoinLeverage   int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
 	MaxPositions      int                     `json:"-"` // 最大持仓数限制（从配置读取）
 	AILearningSummary string                  `json:"-"` // AI学习总结（从数据库加载）
+	DecisionLogger    interface{ GetDB() *database.DB } `json:"-"` // 决策日志记录器（用于获取数据库连接）
 }
 
 // Decision AI的交易决策
@@ -85,10 +87,11 @@ type Decision struct {
 
 // FullDecision AI的完整决策（包含思维链）
 type FullDecision struct {
-	UserPrompt string     `json:"user_prompt"` // 发送给AI的输入prompt
-	CoTTrace   string     `json:"cot_trace"`   // 思维链分析（AI输出）
-	Decisions  []Decision `json:"decisions"`   // 具体决策列表
-	Timestamp  time.Time  `json:"timestamp"`
+	SystemPrompt string     `json:"system_prompt"` // System Prompt（规则，从数据库加载）
+	UserPrompt   string     `json:"user_prompt"`   // User Prompt（市场数据）
+	CoTTrace     string     `json:"cot_trace"`     // 思维链分析（AI输出）
+	Decisions    []Decision `json:"decisions"`     // 具体决策列表
+	Timestamp    time.Time  `json:"timestamp"`
 }
 
 // GetFullDecision 获取AI的完整交易决策（批量分析所有币种和持仓）
@@ -98,8 +101,15 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 		return nil, fmt.Errorf("获取市场数据失败: %w", err)
 	}
 
-	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	// 2. 构建 System Prompt（从数据库加载）和 User Prompt（动态数据）
+	db := ctx.DecisionLogger.GetDB()
+	var systemPrompt string
+	if db != nil {
+		systemPrompt = db.BuildSystemPromptFromDB(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	} else {
+		// fallback到硬编码版本
+		systemPrompt = buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	}
 	userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）
@@ -115,7 +125,8 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	}
 
 	decision.Timestamp = time.Now()
-	decision.UserPrompt = userPrompt // 保存输入prompt
+	decision.SystemPrompt = systemPrompt // 保存system prompt
+	decision.UserPrompt = userPrompt     // 保存user prompt
 	return decision, nil
 }
 
