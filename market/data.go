@@ -25,6 +25,7 @@ type Data struct {
 	FundingRate       float64
 	IntradaySeries    *IntradayData
 	LongerTermContext *LongerTermData
+	AllTimeframes     []*TimeframeData // 所有配置的时间框架数据
 }
 
 // OIData Open Interest数据
@@ -71,6 +72,24 @@ type LongerTermData struct {
 	RSI14Values   []float64
 }
 
+// TimeframeData 单个时间框架的完整数据
+type TimeframeData struct {
+	Interval      string       // 时间周期 (3m, 15m, 4h等)
+	Limit         int          // 配置的K线数量
+	ShowTable     bool         // 是否显示K线数据
+	Klines        []KlinePoint // K线数据
+	EMA20         float64
+	EMA50         float64
+	MACD          float64
+	RSI7          float64
+	RSI14         float64
+	ATR3          float64
+	ATR14         float64
+	CurrentVolume float64
+	AverageVolume float64
+	Patterns      []string // K线形态
+}
+
 // Kline K线数据
 type Kline struct {
 	OpenTime  int64
@@ -106,6 +125,28 @@ func SetKlineSettings(settings []KlineSettings) {
 			log.Printf("[Market] [%d] %s × %d根 (显示表格: %v)", i, s.Interval, s.Limit, s.ShowTable)
 		}
 	}
+}
+
+// getIntervalMinutes 获取时间周期对应的分钟数
+func getIntervalMinutes(interval string) int {
+	minutes := map[string]int{
+		"1m":  1,
+		"3m":  3,
+		"5m":  5,
+		"15m": 15,
+		"30m": 30,
+		"1h":  60,
+		"2h":  120,
+		"4h":  240,
+		"6h":  360,
+		"8h":  480,
+		"12h": 720,
+		"1d":  1440,
+	}
+	if m, ok := minutes[interval]; ok {
+		return m
+	}
+	return 1 // 默认1分钟
 }
 
 // getIntervalName 获取时间周期的可读名称
@@ -209,6 +250,17 @@ func Get(symbol string) (*Data, error) {
 	// 计算长期数据
 	longerTermData := calculateLongerTermData(klines4h)
 
+	// 获取所有配置的时间框架数据
+	allTimeframes := make([]*TimeframeData, 0, len(DefaultKlineSettings))
+	for _, setting := range DefaultKlineSettings {
+		tfData, err := fetchTimeframeData(symbol, setting)
+		if err != nil {
+			log.Printf("⚠️ 获取%s时间框架数据失败: %v", setting.Interval, err)
+			continue
+		}
+		allTimeframes = append(allTimeframes, tfData)
+	}
+
 	return &Data{
 		Symbol:            symbol,
 		CurrentPrice:      currentPrice,
@@ -221,7 +273,69 @@ func Get(symbol string) (*Data, error) {
 		FundingRate:       fundingRate,
 		IntradaySeries:    intradayData,
 		LongerTermContext: longerTermData,
+		AllTimeframes:     allTimeframes,
 	}, nil
+}
+
+// fetchTimeframeData 获取单个时间框架的完整数据
+func fetchTimeframeData(symbol string, setting KlineSettings) (*TimeframeData, error) {
+	// 获取K线数据（多获取20根用于计算指标）
+	klines, err := getKlines(symbol, setting.Interval, setting.Limit+20)
+	if err != nil {
+		return nil, err
+	}
+	
+	if len(klines) == 0 {
+		return nil, fmt.Errorf("没有获取到K线数据")
+	}
+	
+	tfData := &TimeframeData{
+		Interval:  setting.Interval,
+		Limit:     setting.Limit,
+		ShowTable: setting.ShowTable,
+		Klines:    make([]KlinePoint, 0, len(klines)),
+	}
+	
+	// 转换K线数据格式
+	for _, k := range klines {
+		change := 0.0
+		if k.Open != 0 {
+			change = (k.Close - k.Open) / k.Open * 100
+		}
+		tfData.Klines = append(tfData.Klines, KlinePoint{
+			Timestamp: k.OpenTime / 1000,
+			Open:      k.Open,
+			High:      k.High,
+			Low:       k.Low,
+			Close:     k.Close,
+			Volume:    k.Volume,
+			Change:    change,
+		})
+	}
+	
+	// 计算技术指标
+	tfData.EMA20 = calculateEMA(klines, 20)
+	tfData.EMA50 = calculateEMA(klines, 50)
+	tfData.MACD = calculateMACD(klines)
+	tfData.RSI7 = calculateRSI(klines, 7)
+	tfData.RSI14 = calculateRSI(klines, 14)
+	tfData.ATR3 = calculateATR(klines, 3)
+	tfData.ATR14 = calculateATR(klines, 14)
+	
+	// 计算成交量
+	if len(klines) > 0 {
+		tfData.CurrentVolume = klines[len(klines)-1].Volume
+		sum := 0.0
+		for _, k := range klines {
+			sum += k.Volume
+		}
+		tfData.AverageVolume = sum / float64(len(klines))
+	}
+	
+	// K线形态识别
+	tfData.Patterns = identifyPatterns(klines)
+	
+	return tfData, nil
 }
 
 // getKlines 从Binance获取K线数据
@@ -759,6 +873,78 @@ func FormatWithKlineTable(data *Data, showKlineTable bool) string {
 
 		if len(data.LongerTermContext.RSI14Values) > 0 {
 			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
+		}
+	}
+	
+	// 输出所有配置的时间框架K线数据（如果show_table为true）
+	if len(data.AllTimeframes) > 0 && showKlineTable {
+		sb.WriteString("## 📊 配置的时间框架K线数据\n\n")
+		
+		for _, tf := range data.AllTimeframes {
+			if !tf.ShowTable || len(tf.Klines) == 0 {
+				continue
+			}
+			
+			intervalName := getIntervalName(tf.Interval)
+			displayCount := tf.Limit
+			if displayCount > len(tf.Klines) {
+				displayCount = len(tf.Klines)
+			}
+			startIdx := len(tf.Klines) - displayCount
+			
+			startTime := formatTimestamp(tf.Klines[startIdx].Timestamp)
+			endTime := formatTimestamp(tf.Klines[len(tf.Klines)-1].Timestamp)
+			
+			// 根据K线数量和周期计算时间跨度
+			timeSpanMinutes := getIntervalMinutes(tf.Interval) * displayCount
+			timeSpanStr := ""
+			if timeSpanMinutes >= 60 {
+				hours := timeSpanMinutes / 60
+				mins := timeSpanMinutes % 60
+				if mins > 0 {
+					timeSpanStr = fmt.Sprintf("%d小时%d分钟", hours, mins)
+				} else {
+					timeSpanStr = fmt.Sprintf("%d小时", hours)
+				}
+			} else {
+				timeSpanStr = fmt.Sprintf("%d分钟", timeSpanMinutes)
+			}
+			
+			sb.WriteString(fmt.Sprintf("### %s K线 - %d根/%s数据（%s~%s）\n\n", intervalName, displayCount, timeSpanStr, startTime, endTime))
+			
+			// 提取数据为数组
+			opens := make([]string, displayCount)
+			highs := make([]string, displayCount)
+			lows := make([]string, displayCount)
+			closes := make([]string, displayCount)
+			changes := make([]string, displayCount)
+			volumes := make([]string, displayCount)
+			
+			for i, idx := 0, startIdx; idx < len(tf.Klines); i, idx = i+1, idx+1 {
+				kline := tf.Klines[idx]
+				opens[i] = fmt.Sprintf("%.2f", kline.Open)
+				highs[i] = fmt.Sprintf("%.2f", kline.High)
+				lows[i] = fmt.Sprintf("%.2f", kline.Low)
+				closes[i] = fmt.Sprintf("%.2f", kline.Close)
+				changes[i] = fmt.Sprintf("%+.2f%%", kline.Change)
+				volumes[i] = fmt.Sprintf("%.0f", kline.Volume)
+			}
+			
+			sb.WriteString(fmt.Sprintf("Open: [%s]\n", strings.Join(opens, ", ")))
+			sb.WriteString(fmt.Sprintf("High: [%s]\n", strings.Join(highs, ", ")))
+			sb.WriteString(fmt.Sprintf("Low: [%s]\n", strings.Join(lows, ", ")))
+			sb.WriteString(fmt.Sprintf("Close: [%s]\n", strings.Join(closes, ", ")))
+			sb.WriteString(fmt.Sprintf("Change: [%s]\n", strings.Join(changes, ", ")))
+			sb.WriteString(fmt.Sprintf("Volume: [%s]\n", strings.Join(volumes, ", ")))
+			
+			// 技术指标
+			sb.WriteString(fmt.Sprintf("\n**技术指标**: EMA20=%.2f, EMA50=%.2f, MACD=%.3f, RSI7=%.1f, RSI14=%.1f, ATR14=%.3f\n\n",
+				tf.EMA20, tf.EMA50, tf.MACD, tf.RSI7, tf.RSI14, tf.ATR14))
+			
+			// K线形态
+			if len(tf.Patterns) > 0 {
+				sb.WriteString(fmt.Sprintf("**形态**: %s\n\n", strings.Join(tf.Patterns, ", ")))
+			}
 		}
 	}
 
