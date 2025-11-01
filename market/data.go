@@ -606,11 +606,19 @@ func FormatWithKlineTable(data *Data, showKlineTable bool) string {
 		
 		// 输出完整K线表格（根据配置决定，且调用方允许显示）
 		if len(data.IntradaySeries.Klines) > 0 && shortTerm.ShowTable && showKlineTable {
-			sb.WriteString(fmt.Sprintf("**%sK线表格**（最近%d根）:\n\n", intervalName, len(data.IntradaySeries.Klines)))
+			// 只显示配置数量的K线（数据里有更多用于计算指标）
+			displayCount := shortTerm.Limit
+			if displayCount > len(data.IntradaySeries.Klines) {
+				displayCount = len(data.IntradaySeries.Klines)
+			}
+			startIdx := len(data.IntradaySeries.Klines) - displayCount
+			
+			sb.WriteString(fmt.Sprintf("**%sK线表格**（最近%d根）:\n\n", intervalName, displayCount))
 			sb.WriteString("序号 | 时间     | 开盘    | 最高    | 最低    | 收盘    | 涨跌幅   | 成交量\n")
 			sb.WriteString("-----|----------|---------|---------|---------|---------|----------|--------\n")
 			
-			for idx, kline := range data.IntradaySeries.Klines {
+			for idx := startIdx; idx < len(data.IntradaySeries.Klines); idx++ {
+				kline := data.IntradaySeries.Klines[idx]
 				timeStr := formatTimestamp(kline.Timestamp)
 				changeStr := fmt.Sprintf("%+.2f%%", kline.Change)
 				
@@ -625,7 +633,7 @@ func FormatWithKlineTable(data *Data, showKlineTable bool) string {
 				}
 				
 				sb.WriteString(fmt.Sprintf("%-4d | %s | %.2f | %.2f | %.2f | %.2f | %-8s | %.0f%s\n",
-					idx+1, timeStr, kline.Open, kline.High, kline.Low, kline.Close, changeStr, kline.Volume, marker))
+					idx-startIdx+1, timeStr, kline.Open, kline.High, kline.Low, kline.Close, changeStr, kline.Volume, marker))
 			}
 			sb.WriteString("\n")
 			

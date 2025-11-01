@@ -35,6 +35,11 @@ func main() {
 	log.Printf("✓ 配置加载成功，共%d个trader参赛", len(cfg.Traders))
 
 	// 设置市场数据K线配置
+	log.Printf("[DEBUG] MarketData.Klines length: %d", len(cfg.MarketData.Klines))
+	for i, k := range cfg.MarketData.Klines {
+		log.Printf("[DEBUG] Kline[%d]: interval=%s, limit=%d, show_table=%v", i, k.Interval, k.Limit, k.ShowTable)
+	}
+	
 	if len(cfg.MarketData.Klines) > 0 {
 		klineSettings := make([]market.KlineSettings, len(cfg.MarketData.Klines))
 		for i, kline := range cfg.MarketData.Klines {
@@ -46,6 +51,8 @@ func main() {
 		}
 		market.SetKlineSettings(klineSettings)
 		log.Printf("✓ K线配置已加载: %d个时间框架", len(klineSettings))
+	} else {
+		log.Printf("⚠️ 未配置K线数据，将使用默认值")
 	}
 	fmt.Println()
 
