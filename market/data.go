@@ -572,6 +572,16 @@ func getFundingRate(symbol string) (float64, error) {
 
 // Format 格式化输出市场数据
 func Format(data *Data) string {
+	return FormatWithKlineTable(data, true)
+}
+
+// FormatSimple 格式化市场数据为字符串（不包含K线表格，用于候选币种）
+func FormatSimple(data *Data) string {
+	return FormatWithKlineTable(data, false)
+}
+
+// FormatWithKlineTable 格式化市场数据，可选是否包含K线表格
+func FormatWithKlineTable(data *Data, showKlineTable bool) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_rsi (7 period) = %.3f\n\n",
@@ -594,8 +604,8 @@ func Format(data *Data) string {
 		
 		sb.WriteString(fmt.Sprintf("Intraday series (%s intervals, oldest → latest):\n\n", intervalName))
 		
-		// 输出完整K线表格（根据配置决定）
-		if len(data.IntradaySeries.Klines) > 0 && shortTerm.ShowTable {
+		// 输出完整K线表格（根据配置决定，且调用方允许显示）
+		if len(data.IntradaySeries.Klines) > 0 && shortTerm.ShowTable && showKlineTable {
 			sb.WriteString(fmt.Sprintf("**%sK线表格**（最近%d根）:\n\n", intervalName, len(data.IntradaySeries.Klines)))
 			sb.WriteString("序号 | 时间     | 开盘    | 最高    | 最低    | 收盘    | 涨跌幅   | 成交量\n")
 			sb.WriteString("-----|----------|---------|---------|---------|---------|----------|--------\n")
