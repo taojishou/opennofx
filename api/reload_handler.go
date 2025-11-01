@@ -3,6 +3,7 @@ package api
 import (
 	"log"
 	"nofx/config"
+	"nofx/market"
 
 	"github.com/gin-gonic/gin"
 )
@@ -22,7 +23,21 @@ func (s *Server) handleReloadConfig(c *gin.Context) {
 		return
 	}
 
-	// 2. 调用TraderManager的ReloadConfig方法
+	// 2. 更新市场数据K线配置
+	if len(newConfig.MarketData.Klines) > 0 {
+		klineSettings := make([]market.KlineSettings, len(newConfig.MarketData.Klines))
+		for i, kline := range newConfig.MarketData.Klines {
+			klineSettings[i] = market.KlineSettings{
+				Interval:  kline.Interval,
+				Limit:     kline.Limit,
+				ShowTable: kline.ShowTable,
+			}
+		}
+		market.SetKlineSettings(klineSettings)
+		log.Printf("✓ K线配置已热重载: %d个时间框架", len(klineSettings))
+	}
+
+	// 3. 调用TraderManager的ReloadConfig方法
 	err = s.traderManager.ReloadConfig(newConfig)
 	if err != nil {
 		log.Printf("❌ 热重载失败: %v\n", err)
