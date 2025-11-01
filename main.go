@@ -6,6 +6,7 @@ import (
 	"nofx/api"
 	"nofx/config"
 	"nofx/manager"
+	"nofx/market"
 	"nofx/pool"
 	"os"
 	"os/signal"
@@ -32,6 +33,20 @@ func main() {
 	}
 
 	log.Printf("✓ 配置加载成功，共%d个trader参赛", len(cfg.Traders))
+
+	// 设置市场数据K线配置
+	if len(cfg.MarketData.Klines) > 0 {
+		klineSettings := make([]market.KlineSettings, len(cfg.MarketData.Klines))
+		for i, kline := range cfg.MarketData.Klines {
+			klineSettings[i] = market.KlineSettings{
+				Interval:  kline.Interval,
+				Limit:     kline.Limit,
+				ShowTable: kline.ShowTable,
+			}
+		}
+		market.SetKlineSettings(klineSettings)
+		log.Printf("✓ K线配置已加载: %d个时间框架", len(klineSettings))
+	}
 	fmt.Println()
 
 	// 设置默认主流币种列表

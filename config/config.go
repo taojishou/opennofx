@@ -50,21 +50,34 @@ type LeverageConfig struct {
 	AltcoinLeverage int `json:"altcoin_leverage"` // 山寨币的杠杆倍数（主账户建议5-20，子账户≤5）
 }
 
+// KlineConfig K线数据配置
+type KlineConfig struct {
+	Interval  string `json:"interval"`   // K线时间周期: "3m", "5m", "15m", "1h", "4h", "1d"
+	Limit     int    `json:"limit"`      // 显示多少根K线
+	ShowTable bool   `json:"show_table"` // 是否显示K线表格（如果false只显示技术指标序列）
+}
+
+// MarketDataConfig 市场数据配置
+type MarketDataConfig struct {
+	Klines []KlineConfig `json:"klines"` // 支持多个时间框架的K线
+}
+
 // Config 总配置
 type Config struct {
-	Traders            []TraderConfig `json:"traders"`
-	UseDefaultCoins    bool           `json:"use_default_coins"` // 是否使用默认主流币种列表
-	DefaultCoins       []string       `json:"default_coins"`     // 默认主流币种池
-	CoinPoolAPIURL     string         `json:"coin_pool_api_url"`
-	OITopAPIURL        string         `json:"oi_top_api_url"`
-	APIServerPort      int            `json:"api_server_port"`
-	MaxPositions       int            `json:"max_positions"`        // 最大持仓数限制（默认3）
-	MaxDailyLoss       float64        `json:"max_daily_loss"`
-	MaxDrawdown        float64        `json:"max_drawdown"`
-	StopTradingMinutes int            `json:"stop_trading_minutes"`
-	Leverage           LeverageConfig `json:"leverage"`          // 杠杆配置
-	EnableAILearning   bool           `json:"enable_ai_learning"` // 是否启用AI自动学习
-	AILearnInterval    int            `json:"ai_learn_interval"`  // AI学习间隔（周期数）
+	Traders            []TraderConfig   `json:"traders"`
+	UseDefaultCoins    bool             `json:"use_default_coins"` // 是否使用默认主流币种列表
+	DefaultCoins       []string         `json:"default_coins"`     // 默认主流币种池
+	CoinPoolAPIURL     string           `json:"coin_pool_api_url"`
+	OITopAPIURL        string           `json:"oi_top_api_url"`
+	APIServerPort      int              `json:"api_server_port"`
+	MaxPositions       int              `json:"max_positions"`        // 最大持仓数限制（默认3）
+	MaxDailyLoss       float64          `json:"max_daily_loss"`
+	MaxDrawdown        float64          `json:"max_drawdown"`
+	StopTradingMinutes int              `json:"stop_trading_minutes"`
+	Leverage           LeverageConfig   `json:"leverage"`           // 杠杆配置
+	EnableAILearning   bool             `json:"enable_ai_learning"` // 是否启用AI自动学习
+	AILearnInterval    int              `json:"ai_learn_interval"`  // AI学习间隔（周期数）
+	MarketData         MarketDataConfig `json:"market_data"`        // 市场数据配置
 }
 
 // LoadConfig 从文件加载配置
@@ -95,6 +108,14 @@ func LoadConfig(filename string) (*Config, error) {
 			"DOGEUSDT",
 			"ADAUSDT",
 			"HYPEUSDT",
+		}
+	}
+
+	// 设置默认市场数据配置
+	if len(config.MarketData.Klines) == 0 {
+		config.MarketData.Klines = []KlineConfig{
+			{Interval: "3m", Limit: 20, ShowTable: true},  // 3分钟K线，显示20根（1小时）
+			{Interval: "4h", Limit: 60, ShowTable: false}, // 4小时K线，不显示表格
 		}
 	}
 

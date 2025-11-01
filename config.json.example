@@ -81,5 +81,26 @@
   "max_positions": 3,
   "max_daily_loss": 10.0,
   "max_drawdown": 20.0,
-  "stop_trading_minutes": 60
+  "stop_trading_minutes": 60,
+  "enable_ai_learning": true,
+  "ai_learn_interval": 10,
+  "market_data": {
+    "klines": [
+      {
+        "interval": "3m",
+        "limit": 5,
+        "show_table": true
+      },
+      {
+        "interval": "15m",
+        "limit": 10,
+        "show_table": false
+      },
+      {
+        "interval": "4h",
+        "limit": 60,
+        "show_table": false
+      }
+    ]
+  }
 }

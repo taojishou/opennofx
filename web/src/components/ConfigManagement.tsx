@@ -27,6 +27,16 @@ interface TraderConfig {
   scan_interval_minutes: number;
 }
 
+interface KlineConfig {
+  interval: string;
+  limit: number;
+  show_table: boolean;
+}
+
+interface MarketDataConfig {
+  klines: KlineConfig[];
+}
+
 interface SystemConfig {
   traders: TraderConfig[];
   leverage: {
@@ -44,6 +54,7 @@ interface SystemConfig {
   stop_trading_minutes: number;
   enable_ai_learning?: boolean;
   ai_learn_interval?: number;
+  market_data?: MarketDataConfig;
 }
 
 export default function ConfigManagement() {
@@ -518,6 +529,151 @@ export default function ConfigManagement() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* K线数据配置 */}
+          <div className="rounded-2xl p-6 mb-6" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+            <h3 className="text-xl font-bold mb-4 flex items-center gap-2" style={{ color: '#EAECEF' }}>
+              <span>📊 K线数据配置</span>
+            </h3>
+
+            {(!config.market_data || !config.market_data.klines || config.market_data.klines.length === 0) ? (
+              <div className="p-4 mb-4 rounded-lg" style={{ background: '#2B3139', border: '1px solid #474D57' }}>
+                <p className="text-sm mb-3" style={{ color: '#848E9C' }}>
+                  未配置K线数据，将使用默认设置（3分钟20根 + 4小时60根）
+                </p>
+                <button
+                  onClick={() => {
+                    updateGlobalConfig({
+                      market_data: {
+                        klines: [
+                          { interval: '3m', limit: 5, show_table: true },
+                          { interval: '15m', limit: 10, show_table: false },
+                          { interval: '4h', limit: 60, show_table: false }
+                        ]
+                      }
+                    });
+                  }}
+                  className="px-4 py-2 rounded-lg font-medium"
+                  style={{ background: '#0ECB81', color: '#FFFFFF', border: 'none', cursor: 'pointer' }}
+                >
+                  初始化推荐配置
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {config.market_data.klines.map((kline, index) => (
+                  <div key={index} className="p-4 rounded-lg" style={{ background: '#2B3139', border: '1px solid #474D57' }}>
+                    <div className="flex items-center justify-between mb-4">
+                      <h4 className="font-semibold" style={{ color: '#EAECEF' }}>
+                        K线 #{index + 1}
+                      </h4>
+                      {config.market_data!.klines.length > 1 && (
+                        <button
+                          onClick={() => {
+                            const newKlines = config.market_data!.klines.filter((_, i) => i !== index);
+                            updateGlobalConfig({
+                              market_data: { klines: newKlines }
+                            });
+                          }}
+                          className="px-3 py-1 rounded text-sm"
+                          style={{ background: '#F6465D', color: '#FFFFFF', border: 'none', cursor: 'pointer' }}
+                        >
+                          删除
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-4">
+                      <div>
+                        <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>时间周期</label>
+                        <select
+                          value={kline.interval}
+                          onChange={(e) => {
+                            const newKlines = [...config.market_data!.klines];
+                            newKlines[index].interval = e.target.value;
+                            updateGlobalConfig({ market_data: { klines: newKlines } });
+                          }}
+                          className="w-full px-3 py-2 rounded-lg"
+                          style={{ background: '#1E2329', color: '#EAECEF', border: '1px solid #474D57' }}
+                        >
+                          <option value="1m">1分钟</option>
+                          <option value="3m">3分钟</option>
+                          <option value="5m">5分钟</option>
+                          <option value="15m">15分钟</option>
+                          <option value="30m">30分钟</option>
+                          <option value="1h">1小时</option>
+                          <option value="2h">2小时</option>
+                          <option value="4h">4小时</option>
+                          <option value="6h">6小时</option>
+                          <option value="12h">12小时</option>
+                          <option value="1d">1天</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>K线数量</label>
+                        <input
+                          type="number"
+                          min="5"
+                          max="200"
+                          value={kline.limit}
+                          onChange={(e) => {
+                            const newKlines = [...config.market_data!.klines];
+                            newKlines[index].limit = parseInt(e.target.value) || 20;
+                            updateGlobalConfig({ market_data: { klines: newKlines } });
+                          }}
+                          className="w-full px-3 py-2 rounded-lg"
+                          style={{ background: '#1E2329', color: '#EAECEF', border: '1px solid #474D57' }}
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>显示表格</label>
+                        <label className="flex items-center cursor-pointer pt-2">
+                          <input
+                            type="checkbox"
+                            checked={kline.show_table}
+                            onChange={(e) => {
+                              const newKlines = [...config.market_data!.klines];
+                              newKlines[index].show_table = e.target.checked;
+                              updateGlobalConfig({ market_data: { klines: newKlines } });
+                            }}
+                            className="w-5 h-5 mr-2"
+                            style={{ accentColor: '#0ECB81' }}
+                          />
+                          <span style={{ color: '#EAECEF' }}>显示K线表格</span>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                {config.market_data.klines.length < 5 && (
+                  <button
+                    onClick={() => {
+                      const newKline = { interval: '15m', limit: 10, show_table: false };
+                      updateGlobalConfig({
+                        market_data: {
+                          klines: [...(config.market_data?.klines || []), newKline]
+                        }
+                      });
+                    }}
+                    className="w-full px-4 py-2 rounded-lg font-medium"
+                    style={{ background: '#0ECB81', color: '#FFFFFF', border: 'none', cursor: 'pointer' }}
+                  >
+                    + 添加K线配置
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="mt-4 p-3 rounded-lg" style={{ background: 'rgba(240, 185, 11, 0.1)', border: '1px solid rgba(240, 185, 11, 0.3)' }}>
+              <p className="text-sm leading-relaxed" style={{ color: '#F0B90B', margin: 0 }}>
+                💡 <strong>建议</strong>: K线数据过多会增加prompt大小，可能导致AI过度交易。<br/>
+                推荐：3分钟5根（参考）+ 15分钟10根（决策）+ 4小时60根（趋势）
+              </p>
             </div>
           </div>
 

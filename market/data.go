@@ -80,21 +80,86 @@ type Kline struct {
 	CloseTime int64
 }
 
+// KlineSettings K线配置（避免循环依赖，不直接使用config包）
+type KlineSettings struct {
+	Interval  string // "3m", "5m", "15m", "1h", "4h", "1d"
+	Limit     int    // 显示多少根K线
+	ShowTable bool   // 是否显示K线表格
+}
+
+var (
+	// 默认K线配置（可被外部覆盖）
+	DefaultKlineSettings = []KlineSettings{
+		{Interval: "3m", Limit: 20, ShowTable: true},
+		{Interval: "4h", Limit: 60, ShowTable: false},
+	}
+)
+
+// SetKlineSettings 设置K线配置（由main函数在启动时调用）
+func SetKlineSettings(settings []KlineSettings) {
+	if len(settings) > 0 {
+		DefaultKlineSettings = settings
+	}
+}
+
+// getIntervalName 获取时间周期的可读名称
+func getIntervalName(interval string) string {
+	names := map[string]string{
+		"1m":  "1分钟",
+		"3m":  "3分钟",
+		"5m":  "5分钟",
+		"15m": "15分钟",
+		"30m": "30分钟",
+		"1h":  "1小时",
+		"2h":  "2小时",
+		"4h":  "4小时",
+		"6h":  "6小时",
+		"12h": "12小时",
+		"1d":  "1天",
+	}
+	if name, ok := names[interval]; ok {
+		return name
+	}
+	return interval
+}
+
 // Get 获取指定代币的市场数据
 func Get(symbol string) (*Data, error) {
 	// 标准化symbol
 	symbol = Normalize(symbol)
 
-	// 获取3分钟K线数据 (最近10个)
-	klines3m, err := getKlines(symbol, "3m", 40) // 多获取一些用于计算
-	if err != nil {
-		return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
+	// 根据配置获取K线数据（第一个配置作为短期，第二个作为长期）
+	var klines3m, klines4h []Kline
+	var err error
+
+	if len(DefaultKlineSettings) > 0 {
+		// 短期K线
+		shortTerm := DefaultKlineSettings[0]
+		klines3m, err = getKlines(symbol, shortTerm.Interval, shortTerm.Limit+20) // 多获取20根用于计算指标
+		if err != nil {
+			return nil, fmt.Errorf("获取%s K线失败: %v", shortTerm.Interval, err)
+		}
+	} else {
+		// fallback 到默认值
+		klines3m, err = getKlines(symbol, "3m", 40)
+		if err != nil {
+			return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
+		}
 	}
 
-	// 获取4小时K线数据 (最近10个)
-	klines4h, err := getKlines(symbol, "4h", 60) // 多获取用于计算指标
-	if err != nil {
-		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
+	if len(DefaultKlineSettings) > 1 {
+		// 长期K线
+		longTerm := DefaultKlineSettings[1]
+		klines4h, err = getKlines(symbol, longTerm.Interval, longTerm.Limit)
+		if err != nil {
+			return nil, fmt.Errorf("获取%s K线失败: %v", longTerm.Interval, err)
+		}
+	} else {
+		// fallback 到默认值
+		klines4h, err = getKlines(symbol, "4h", 60)
+		if err != nil {
+			return nil, fmt.Errorf("获取4小时K线失败: %v", err)
+		}
 	}
 
 	// 计算当前指标 (基于3分钟最新数据)
@@ -523,11 +588,15 @@ func Format(data *Data) string {
 	sb.WriteString(fmt.Sprintf("Funding Rate: %.2e\n\n", data.FundingRate))
 
 	if data.IntradaySeries != nil {
-		sb.WriteString("Intraday series (3‑minute intervals, oldest → latest):\n\n")
+		// 获取短期K线配置
+		shortTerm := DefaultKlineSettings[0]
+		intervalName := getIntervalName(shortTerm.Interval)
 		
-		// 输出完整K线表格（最近20根）
-		if len(data.IntradaySeries.Klines) > 0 {
-			sb.WriteString("**3分钟K线表格**（最近20根，1小时数据）:\n\n")
+		sb.WriteString(fmt.Sprintf("Intraday series (%s intervals, oldest → latest):\n\n", intervalName))
+		
+		// 输出完整K线表格（根据配置决定）
+		if len(data.IntradaySeries.Klines) > 0 && shortTerm.ShowTable {
+			sb.WriteString(fmt.Sprintf("**%sK线表格**（最近%d根）:\n\n", intervalName, len(data.IntradaySeries.Klines)))
 			sb.WriteString("序号 | 时间     | 开盘    | 最高    | 最低    | 收盘    | 涨跌幅   | 成交量\n")
 			sb.WriteString("-----|----------|---------|---------|---------|---------|----------|--------\n")
 			
