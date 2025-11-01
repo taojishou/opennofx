@@ -1584,12 +1584,18 @@ func (at *AutoTrader) CallAI(systemPrompt, userPrompt string) (string, error) {
 func (at *AutoTrader) maybeGenerateAILearningSummary() {
 	db := at.decisionLogger.GetDB()
 	if db == nil {
+		log.Printf("⚠️  [%s] 数据库未初始化，跳过AI学习总结生成", at.name)
 		return
 	}
 
 	// 获取最近的交易记录
 	trades, err := db.GetTradeOutcomes(20)
-	if err != nil || len(trades) < 5 {
+	if err != nil {
+		log.Printf("⚠️  [%s] 获取交易记录失败: %v，跳过AI学习总结生成", at.name, err)
+		return
+	}
+	if len(trades) < 5 {
+		log.Printf("⚠️  [%s] 交易记录不足（%d笔 < 5笔），跳过AI学习总结生成", at.name, len(trades))
 		return // 交易太少，跳过
 	}
 
