@@ -121,6 +121,18 @@ export default function ConfigManagement() {
       const aiLearnInterval = config.ai_learn_interval === undefined || config.ai_learn_interval === 0 
         ? 10 
         : config.ai_learn_interval;
+
+      // 验证并修复market_data中的空值
+      let marketData = config.market_data;
+      if (marketData && marketData.klines) {
+        marketData = {
+          klines: marketData.klines.map(k => ({
+            interval: k.interval,
+            limit: k.limit || 20, // 空值设为默认20
+            show_table: k.show_table
+          }))
+        };
+      }
       
       const response = await fetch('/api/config/global/update', {
         method: 'POST',
@@ -138,6 +150,7 @@ export default function ConfigManagement() {
           altcoin_leverage: config.leverage.altcoin_leverage,
           enable_ai_learning: config.enable_ai_learning,
           ai_learn_interval: aiLearnInterval,
+          market_data: marketData,
         }),
       });
       const data = await response.json();

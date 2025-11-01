@@ -39,18 +39,19 @@ func (s *Server) handleUpdateGlobalConfig(c *gin.Context) {
 	defer configMutex.Unlock()
 
 	var req struct {
-		UseDefaultCoins    *bool    `json:"use_default_coins"`
-		DefaultCoins       []string `json:"default_coins"`
-		CoinPoolAPIURL     *string  `json:"coin_pool_api_url"`
-		OITopAPIURL        *string  `json:"oi_top_api_url"`
-		MaxPositions       *int     `json:"max_positions"`
-		MaxDailyLoss       *float64 `json:"max_daily_loss"`
-		MaxDrawdown        *float64 `json:"max_drawdown"`
-		StopTradingMinutes *int     `json:"stop_trading_minutes"`
-		BTCETHLeverage     *int     `json:"btc_eth_leverage"`
-		AltcoinLeverage    *int     `json:"altcoin_leverage"`
-		EnableAILearning   *bool    `json:"enable_ai_learning"`
-		AILearnInterval    *int     `json:"ai_learn_interval"`
+		UseDefaultCoins    *bool                   `json:"use_default_coins"`
+		DefaultCoins       []string                `json:"default_coins"`
+		CoinPoolAPIURL     *string                 `json:"coin_pool_api_url"`
+		OITopAPIURL        *string                 `json:"oi_top_api_url"`
+		MaxPositions       *int                    `json:"max_positions"`
+		MaxDailyLoss       *float64                `json:"max_daily_loss"`
+		MaxDrawdown        *float64                `json:"max_drawdown"`
+		StopTradingMinutes *int                    `json:"stop_trading_minutes"`
+		BTCETHLeverage     *int                    `json:"btc_eth_leverage"`
+		AltcoinLeverage    *int                    `json:"altcoin_leverage"`
+		EnableAILearning   *bool                   `json:"enable_ai_learning"`
+		AILearnInterval    *int                    `json:"ai_learn_interval"`
+		MarketData         *config.MarketDataConfig `json:"market_data"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -100,6 +101,9 @@ func (s *Server) handleUpdateGlobalConfig(c *gin.Context) {
 	}
 	if req.AILearnInterval != nil {
 		cfg.AILearnInterval = *req.AILearnInterval
+	}
+	if req.MarketData != nil {
+		cfg.MarketData = *req.MarketData
 	}
 
 	// 验证配置
