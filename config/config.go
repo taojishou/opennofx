@@ -285,6 +285,12 @@ func (c *Config) MaskSensitiveData() *Config {
 		masked.Traders[i] = maskedTrader
 	}
 	
+	// 保留MarketData配置（深拷贝）
+	if c.MarketData.Klines != nil {
+		masked.MarketData.Klines = make([]KlineConfig, len(c.MarketData.Klines))
+		copy(masked.MarketData.Klines, c.MarketData.Klines)
+	}
+	
 	return &masked
 }
 
