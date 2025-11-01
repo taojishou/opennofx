@@ -99,6 +99,10 @@ var (
 func SetKlineSettings(settings []KlineSettings) {
 	if len(settings) > 0 {
 		DefaultKlineSettings = settings
+		log.Printf("[Market] DefaultKlineSettings 已更新为 %d 个配置", len(DefaultKlineSettings))
+		for i, s := range DefaultKlineSettings {
+			log.Printf("[Market] [%d] %s × %d根 (显示表格: %v)", i, s.Interval, s.Limit, s.ShowTable)
+		}
 	}
 }
 
