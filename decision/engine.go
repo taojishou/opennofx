@@ -391,9 +391,9 @@ func buildUserPrompt(ctx *Context) string {
 			sourceTags = " (OI_Top持仓增长)"
 		}
 
-		// 候选币种只显示关键数据，不显示K线表格（避免prompt过大）
+		// 候选币种显示完整市场数据（是否包含K线表格由配置决定）
 		sb.WriteString(fmt.Sprintf("### %d. %s%s\n\n", displayedCount, coin.Symbol, sourceTags))
-		sb.WriteString(market.FormatSimple(marketData))
+		sb.WriteString(market.Format(marketData))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("\n")
