@@ -1455,28 +1455,37 @@ func NewDecisionQualityAnalyzer(ctx *Context, marketCondition MarketCondition) *
 
 // EvaluateDecisionQuality 评估决策质量
 func (dqa *DecisionQualityAnalyzer) EvaluateDecisionQuality(decision *Decision) DecisionQuality {
-	score := 100.0
 	issues := []string{}
+	
+	// 各维度权重配置
+	weights := map[string]float64{
+		"technical": 0.30, // 技术信号 30%
+		"risk":      0.35, // 风险管理 35%
+		"market":    0.20, // 市场环境 20%
+		"timing":    0.15, // 时机选择 15%
+	}
 	
 	// 检查技术信号质量
 	techScore, techIssues := dqa.evaluateTechnicalSignals(decision)
-	score *= techScore
 	issues = append(issues, techIssues...)
 	
 	// 检查风险管理质量
 	riskScore, riskIssues := dqa.evaluateRiskManagement(decision)
-	score *= riskScore
 	issues = append(issues, riskIssues...)
 	
 	// 检查市场环境适应性
 	envScore, envIssues := dqa.evaluateMarketEnvironment(decision)
-	score *= envScore
 	issues = append(issues, envIssues...)
 	
 	// 检查时机选择
 	timingScore, timingIssues := dqa.evaluateTiming(decision)
-	score *= timingScore
 	issues = append(issues, timingIssues...)
+	
+	// 加权平均计算总分（每个子项都是0-1之间的分数）
+	score := techScore*weights["technical"]*100 +
+		riskScore*weights["risk"]*100 +
+		envScore*weights["market"]*100 +
+		timingScore*weights["timing"]*100
 	
 	// 确定质量等级
 	var grade string
@@ -1527,6 +1536,56 @@ func (dqa *DecisionQualityAnalyzer) evaluateTechnicalSignals(decision *Decision)
 		issues = append(issues, "MACD正值时做空需谨慎")
 	}
 	
+	// 布林通道信号检查
+	if data.EnhancedIndicators != nil && data.EnhancedIndicators.BollingerBands != nil {
+		bb := data.EnhancedIndicators.BollingerBands
+		
+		// 检查布林带位置
+		if decision.Action == "open_long" {
+			// 做多时价格在上轨附近风险较高（可能回调）
+			if bb.Position > 0.9 {
+				score *= 0.6
+				issues = append(issues, "价格触及布林上轨，做多风险高，可能回调")
+			} else if bb.Position > 0.7 {
+				score *= 0.8
+				issues = append(issues, "价格接近布林上轨，短期超买")
+			}
+			// 价格在下轨附近是好的做多机会
+			if bb.Position < 0.3 {
+				score *= 1.1 // 加分
+			}
+		}
+		
+		if decision.Action == "open_short" {
+			// 做空时价格在下轨附近风险较高（可能反弹）
+			if bb.Position < 0.1 {
+				score *= 0.6
+				issues = append(issues, "价格触及布林下轨，做空风险高，可能反弹")
+			} else if bb.Position < 0.3 {
+				score *= 0.8
+				issues = append(issues, "价格接近布林下轨，短期超卖")
+			}
+			// 价格在上轨附近是好的做空机会
+			if bb.Position > 0.7 {
+				score *= 1.1 // 加分
+			}
+		}
+		
+		// 检查布林带宽度（波动率）
+		if bb.Width < 2.0 {
+			// Bollinger Squeeze - 窄带预示即将突破
+			if decision.Action == "open_long" || decision.Action == "open_short" {
+				issues = append(issues, fmt.Sprintf("布林带收窄(%.2f%%)，市场可能酝酿突破", bb.Width))
+			}
+		} else if bb.Width > 10.0 {
+			// 宽带表示高波动
+			if decision.Leverage > 5 {
+				score *= 0.8
+				issues = append(issues, fmt.Sprintf("布林带宽幅较大(%.2f%%)，高杠杆风险较高", bb.Width))
+			}
+		}
+	}
+	
 	return score, issues
 }
 
@@ -1536,6 +1595,8 @@ func (dqa *DecisionQualityAnalyzer) evaluateRiskManagement(decision *Decision) (
 	issues := []string{}
 	
 	if decision.Action == "open_long" || decision.Action == "open_short" {
+		data := dqa.ctx.MarketDataMap[decision.Symbol]
+		
 		// 检查止损设置
 		if decision.StopLoss == 0 {
 			score *= 0.3
@@ -1552,14 +1613,14 @@ func (dqa *DecisionQualityAnalyzer) evaluateRiskManagement(decision *Decision) (
 		if decision.StopLoss > 0 && decision.TakeProfit > 0 {
 			var riskRewardRatio float64
 			if decision.Action == "open_long" {
-				risk := math.Abs(decision.StopLoss - dqa.ctx.MarketDataMap[decision.Symbol].CurrentPrice)
-				reward := math.Abs(decision.TakeProfit - dqa.ctx.MarketDataMap[decision.Symbol].CurrentPrice)
+				risk := math.Abs(decision.StopLoss - data.CurrentPrice)
+				reward := math.Abs(decision.TakeProfit - data.CurrentPrice)
 				if risk > 0 {
 					riskRewardRatio = reward / risk
 				}
 			} else {
-				risk := math.Abs(dqa.ctx.MarketDataMap[decision.Symbol].CurrentPrice - decision.StopLoss)
-				reward := math.Abs(dqa.ctx.MarketDataMap[decision.Symbol].CurrentPrice - decision.TakeProfit)
+				risk := math.Abs(data.CurrentPrice - decision.StopLoss)
+				reward := math.Abs(data.CurrentPrice - decision.TakeProfit)
 				if risk > 0 {
 					riskRewardRatio = reward / risk
 				}
@@ -1574,11 +1635,74 @@ func (dqa *DecisionQualityAnalyzer) evaluateRiskManagement(decision *Decision) (
 			}
 		}
 		
-		// 检查仓位大小
-		maxPositionSize := dqa.ctx.Account.TotalEquity * 3.0 // 最大3倍杠杆等效
-		if decision.PositionSizeUSD > maxPositionSize {
-			score *= 0.6
-			issues = append(issues, "仓位过大，超出风险承受能力")
+		// 布林通道辅助止损验证
+		if data.EnhancedIndicators != nil && data.EnhancedIndicators.BollingerBands != nil {
+			bb := data.EnhancedIndicators.BollingerBands
+			
+			// 检查止损位置是否合理（应该在布林带外）
+			if decision.Action == "open_long" && decision.StopLoss > 0 {
+				// 做多止损应该在下轨以下
+				if decision.StopLoss > bb.Lower {
+					score *= 0.9
+					issues = append(issues, fmt.Sprintf("做多止损%.2f在布林下轨%.2f之上，空间不足", decision.StopLoss, bb.Lower))
+				}
+				// 理想：止损在下轨下方1-2个ATR
+				stopDistance := (data.CurrentPrice - decision.StopLoss) / data.CurrentPrice * 100
+				bbWidth := bb.Width / 2 // 中轨到边轨的距离
+				if stopDistance < bbWidth * 0.5 {
+					score *= 0.9
+					issues = append(issues, fmt.Sprintf("止损距离%.2f%%过小，易被噪音触发(建议>%.2f%%)", stopDistance, bbWidth*0.5))
+				}
+			}
+			
+			if decision.Action == "open_short" && decision.StopLoss > 0 {
+				// 做空止损应该在上轨以上
+				if decision.StopLoss < bb.Upper {
+					score *= 0.9
+					issues = append(issues, fmt.Sprintf("做空止损%.2f在布林上轨%.2f之下，空间不足", decision.StopLoss, bb.Upper))
+				}
+				stopDistance := (decision.StopLoss - data.CurrentPrice) / data.CurrentPrice * 100
+				bbWidth := bb.Width / 2
+				if stopDistance < bbWidth * 0.5 {
+					score *= 0.9
+					issues = append(issues, fmt.Sprintf("止损距离%.2f%%过小，易被噪音触发(建议>%.2f%%)", stopDistance, bbWidth*0.5))
+				}
+			}
+		}
+		
+		// 根据布林带宽度调整仓位大小建议
+		if data.EnhancedIndicators != nil && data.EnhancedIndicators.BollingerBands != nil {
+			bb := data.EnhancedIndicators.BollingerBands
+			baseMaxSize := dqa.ctx.Account.TotalEquity * 3.0
+			
+			// 高波动时降低仓位上限
+			if bb.Width > 10.0 {
+				maxPositionSize := baseMaxSize * 0.7 // 降低30%
+				if decision.PositionSizeUSD > maxPositionSize {
+					score *= 0.7
+					issues = append(issues, fmt.Sprintf("高波动环境(BB宽度%.2f%%)，建议降低仓位", bb.Width))
+				}
+			} else if bb.Width < 2.0 {
+				// 低波动（Squeeze）时可以适当加大仓位
+				maxPositionSize := baseMaxSize * 1.2 // 提高20%
+				if decision.PositionSizeUSD > maxPositionSize {
+					score *= 0.8
+					issues = append(issues, "即使低波动，仓位仍需控制")
+				}
+			} else {
+				// 正常波动
+				if decision.PositionSizeUSD > baseMaxSize {
+					score *= 0.6
+					issues = append(issues, "仓位过大，超出风险承受能力")
+				}
+			}
+		} else {
+			// 没有布林带数据时的默认检查
+			maxPositionSize := dqa.ctx.Account.TotalEquity * 3.0
+			if decision.PositionSizeUSD > maxPositionSize {
+				score *= 0.6
+				issues = append(issues, "仓位过大，超出风险承受能力")
+			}
 		}
 	}
 	
@@ -1590,6 +1714,8 @@ func (dqa *DecisionQualityAnalyzer) evaluateMarketEnvironment(decision *Decision
 	score := 1.0
 	issues := []string{}
 	
+	data := dqa.ctx.MarketDataMap[decision.Symbol]
+	
 	// 高风险环境下的决策评估
 	if dqa.marketCondition.Risk == "very_high" || dqa.marketCondition.Risk == "high" {
 		if decision.Action == "open_long" || decision.Action == "open_short" {
@@ -1598,8 +1724,31 @@ func (dqa *DecisionQualityAnalyzer) evaluateMarketEnvironment(decision *Decision
 		}
 	}
 	
-	// 高波动环境下的决策评估
-	if dqa.marketCondition.Volatility == "high" {
+	// 高波动环境下的决策评估（优先使用布林带宽度）
+	if data.EnhancedIndicators != nil && data.EnhancedIndicators.BollingerBands != nil {
+		bb := data.EnhancedIndicators.BollingerBands
+		
+		if bb.Width > 10.0 {
+			// 高波动
+			if decision.Leverage > 5 {
+				score *= 0.6
+				issues = append(issues, fmt.Sprintf("高波动环境(BB宽度%.2f%%)，高杠杆风险大", bb.Width))
+			}
+		} else if bb.Width < 2.0 {
+			// 低波动 - Bollinger Squeeze
+			if decision.Action == "open_long" || decision.Action == "open_short" {
+				// Squeeze后的突破往往很强劲
+				if bb.Position > 0.8 || bb.Position < 0.2 {
+					score *= 1.15 // 加分：突破布林带的Squeeze
+					issues = append(issues, fmt.Sprintf("布林带收窄(%.2f%%)后突破，信号较强", bb.Width))
+				} else {
+					score *= 0.85
+					issues = append(issues, fmt.Sprintf("布林带收窄(%.2f%%)，方向未明确前等待", bb.Width))
+				}
+			}
+		}
+	} else if dqa.marketCondition.Volatility == "high" {
+		// 没有布林带数据时使用市场条件
 		if decision.Leverage > 5 {
 			score *= 0.7
 			issues = append(issues, "高波动环境下使用高杠杆风险较大")
@@ -1614,6 +1763,27 @@ func (dqa *DecisionQualityAnalyzer) evaluateMarketEnvironment(decision *Decision
 	if dqa.marketCondition.Sentiment == "fearful" && decision.Action == "open_short" {
 		score *= 0.8
 		issues = append(issues, "市场恐慌时做空需要谨慎")
+	}
+	
+	// 布林带整体趋势判断
+	if data.EnhancedIndicators != nil && data.EnhancedIndicators.BollingerBands != nil {
+		bb := data.EnhancedIndicators.BollingerBands
+		
+		// 价格持续在上轨运行（强势上升趋势）
+		if bb.Position > 0.85 && data.CurrentPrice > bb.Upper {
+			if decision.Action == "open_short" {
+				score *= 0.7
+				issues = append(issues, "价格沿上轨强势上涨，逆势做空风险高")
+			}
+		}
+		
+		// 价格持续在下轨运行（强势下降趋势）
+		if bb.Position < 0.15 && data.CurrentPrice < bb.Lower {
+			if decision.Action == "open_long" {
+				score *= 0.7
+				issues = append(issues, "价格沿下轨强势下跌，逆势做多风险高")
+			}
+		}
 	}
 	
 	return score, issues

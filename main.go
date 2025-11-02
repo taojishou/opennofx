@@ -110,29 +110,32 @@ func main() {
 
 	// 检查是否至少有一个启用的trader
 	if enabledCount == 0 {
-		log.Fatalf("❌ 没有启用的trader，请在数据库中设置至少一个trader的enabled=true")
-	}
-
-	fmt.Println()
-	fmt.Println("🏁 竞赛参赛者:")
-	for _, traderCfg := range cfg.Traders {
-		// 只显示启用的trader
-		if !traderCfg.Enabled {
-			continue
+		log.Printf("⚠️  当前没有启用的trader，系统将启动API服务器等待配置")
+		log.Printf("💡 请访问 http://localhost:%d 添加trader配置", cfg.APIServerPort)
+	} else {
+		fmt.Println()
+		fmt.Println("🏁 竞赛参赛者:")
+		for _, traderCfg := range cfg.Traders {
+			// 只显示启用的trader
+			if !traderCfg.Enabled {
+				continue
+			}
+			fmt.Printf("  • %s (%s) - 初始资金: %.0f USDT\n",
+				traderCfg.Name, strings.ToUpper(traderCfg.AIModel), traderCfg.InitialBalance)
 		}
-		fmt.Printf("  • %s (%s) - 初始资金: %.0f USDT\n",
-			traderCfg.Name, strings.ToUpper(traderCfg.AIModel), traderCfg.InitialBalance)
 	}
 
-	fmt.Println()
-	fmt.Println("🤖 AI全权决策模式:")
-	fmt.Printf("  • AI将自主决定每笔交易的杠杆倍数（山寨币最高%d倍，BTC/ETH最高%d倍）\n",
-		cfg.Leverage.AltcoinLeverage, cfg.Leverage.BTCETHLeverage)
-	fmt.Println("  • AI将自主决定每笔交易的仓位大小")
-	fmt.Println("  • AI将自主设置止损和止盈价格")
-	fmt.Println("  • AI将基于市场数据、技术指标、账户状态做出全面分析")
-	fmt.Println()
-	fmt.Println("⚠️  风险提示: AI自动交易有风险，建议小额资金测试！")
+	if enabledCount > 0 {
+		fmt.Println()
+		fmt.Println("🤖 AI全权决策模式:")
+		fmt.Printf("  • AI将自主决定每笔交易的杠杆倍数（山寨币最高%d倍，BTC/ETH最高%d倍）\n",
+			cfg.Leverage.AltcoinLeverage, cfg.Leverage.BTCETHLeverage)
+		fmt.Println("  • AI将自主决定每笔交易的仓位大小")
+		fmt.Println("  • AI将自主设置止损和止盈价格")
+		fmt.Println("  • AI将基于市场数据、技术指标、账户状态做出全面分析")
+		fmt.Println()
+		fmt.Println("⚠️  风险提示: AI自动交易有风险，建议小额资金测试！")
+	}
 	fmt.Println()
 	fmt.Println("按 Ctrl+C 停止运行")
 	fmt.Println(strings.Repeat("=", 60))
@@ -150,8 +153,12 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// 启动所有trader
-	traderManager.StartAll()
+	// 启动所有trader（如果有的话）
+	if enabledCount > 0 {
+		traderManager.StartAll()
+	} else {
+		log.Println("💤 等待添加trader配置...")
+	}
 
 	// 等待退出信号
 	<-sigChan
