@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"nofx/database"
+	"nofx/database/models"
 	"nofx/decision"
 	"nofx/logger"
 	"nofx/market"
@@ -67,6 +67,12 @@ type AutoTraderConfig struct {
 	// AI学习配置
 	EnableAILearning bool // 是否启用AI自动学习总结
 	AILearnInterval  int  // AI学习触发间隔（几个周期一次）
+	
+	// AI自主模式
+	AIAutonomyMode bool // true=完全自主决策，false=限制模式（默认）
+	
+	// 数据优化配置
+	CompactMode bool // true=紧凑模式（减少数据量），false=完整模式
 
 	// 风险控制（仅作为提示，AI可自主决定）
 	MaxDailyLoss    float64       // 最大日亏损百分比（提示）
@@ -101,6 +107,10 @@ type AutoTrader struct {
 
 // NewAutoTrader 创建自动交易器
 func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
+	// 调试：打印接收到的config
+	log.Printf("[DEBUG] NewAutoTrader config: ID=%s AIAutonomyMode=%v CompactMode=%v", 
+		config.ID, config.AIAutonomyMode, config.CompactMode)
+	
 	// 设置默认值
 	if config.ID == "" {
 		config.ID = "default_trader"
@@ -173,7 +183,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	}
 
 	// 初始化决策日志记录器（使用trader ID创建独立目录）
-	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
+	logDir := fmt.Sprintf("data/traders/%s", config.ID)
 	decisionLogger := logger.NewDecisionLogger(logDir)
 
 	// 设置默认最大持仓数
@@ -232,6 +242,22 @@ func (at *AutoTrader) Run() error {
 	log.Println("🚀 AI驱动自动交易系统启动")
 	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
+	
+	// 打印AI模式
+	if at.config.AIAutonomyMode {
+		log.Println("🚀 AI模式: 完全自主模式 (无限制)")
+	} else {
+		log.Println("🛡️ AI模式: 限制模式 (风控保护)")
+	}
+	
+	// 同步数据优化模式
+	market.CompactMode = at.config.CompactMode
+	if market.CompactMode {
+		log.Println("📦 数据模式: 紧凑模式 (优化性能)")
+	} else {
+		log.Println("📊 数据模式: 完整模式 (完整数据)")
+	}
+	
 	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
 	ticker := time.NewTicker(at.config.ScanInterval)
@@ -314,6 +340,14 @@ func (at *AutoTrader) runCycle() error {
 		record.ErrorMessage = fmt.Sprintf("构建交易上下文失败: %v", err)
 		at.decisionLogger.LogDecision(record)
 		return fmt.Errorf("构建交易上下文失败: %w", err)
+	}
+	
+	// 打印当前周期和模式信息
+	log.Printf("📊 [%s] ===== 交易周期 #%d 开始 =====", at.name, at.callCount)
+	if at.config.AIAutonomyMode {
+		log.Println("🚀 当前模式: 完全自主模式 (AI无限制)")
+	} else {
+		log.Println("🛡️ 当前模式: 限制模式 (严格风控)")
 	}
 	
 	// 记录自动平仓事件（如果有）
@@ -613,9 +647,8 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, []logger.Decisio
 	at.lastKnownPositions = currentPositionKeys
 
 	// 3. 获取合并的候选币种池（AI500 + OI Top，去重）
-	// 无论有没有持仓，都分析相同数量的币种（让AI看到所有好机会）
-	// AI会根据保证金使用率和现有持仓情况，自己决定是否要换仓
-	const ai500Limit = 20 // AI500取前20个评分最高的币种
+	// 优化：减少候选币种数量，提高响应速度
+	const ai500Limit = 10 // AI500取前10个评分最高的币种（从20减少到10）
 
 	// 获取合并后的币种池（AI500 + OI Top）
 	mergedPool, err := pool.GetMergedCoinPool(ai500Limit)
@@ -669,7 +702,21 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, []logger.Decisio
 		}
 	}
 
-	// 7. 构建上下文
+	// 7. 构建账户信息（包含风险管理字段）
+	accountInfo := decision.AccountInfo{
+		TotalEquity:      totalEquity,
+		AvailableBalance: availableBalance,
+		TotalPnL:         totalPnL,
+		TotalPnLPct:      totalPnLPct,
+		MarginUsed:       totalMarginUsed,
+		MarginUsedPct:    marginUsedPct,
+		PositionCount:    len(positionInfos),
+	}
+
+	// 8. 构建上下文（先构建基础上下文用于风险计算）
+	// 调试：打印传递的AIAutonomyMode值
+	log.Printf("[DEBUG] buildTradingContext: at.config.AIAutonomyMode=%v", at.config.AIAutonomyMode)
+	
 	ctx := &decision.Context{
 		CurrentTime:       time.Now().Format("2006-01-02 15:04:05"),
 		RuntimeMinutes:    int(time.Since(at.startTime).Minutes()),
@@ -679,19 +726,21 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, []logger.Decisio
 		MaxPositions:      at.config.MaxPositions,    // 使用配置的最大持仓数
 		AILearningSummary: aiLearningSummary, // 添加AI学习总结
 		DecisionLogger:    at.decisionLogger, // 传递DecisionLogger用于访问数据库
-		Account: decision.AccountInfo{
-			TotalEquity:      totalEquity,
-			AvailableBalance: availableBalance,
-			TotalPnL:         totalPnL,
-			TotalPnLPct:      totalPnLPct,
-			MarginUsed:       totalMarginUsed,
-			MarginUsedPct:    marginUsedPct,
-			PositionCount:    len(positionInfos),
-		},
-		Positions:      positionInfos,
-		CandidateCoins: candidateCoins,
-		Performance:    performance, // 添加历史表现分析
+		AIAutonomyMode:    at.config.AIAutonomyMode, // AI自主模式
+		Account:           accountInfo,
+		Positions:         positionInfos,
+		CandidateCoins:    candidateCoins,
+		Performance:       performance, // 添加历史表现分析
 	}
+	
+	// 调试：打印构建后的Context.AIAutonomyMode
+	log.Printf("[DEBUG] buildTradingContext: ctx.AIAutonomyMode=%v", ctx.AIAutonomyMode)
+
+	// 9. 计算风险管理指标
+	ctx.RiskMetrics = decision.CalculateRiskMetrics(ctx)
+	
+	// 10. 计算账户风险相关字段
+	decision.CalculateAccountRiskMetrics(&ctx.Account, totalEquity, positionInfos)
 
 	return ctx, autoClosedPositions, nil
 }
@@ -1653,7 +1702,7 @@ func (at *AutoTrader) maybeGenerateAILearningSummary() {
 	dateEnd := trades[0].CloseTime.Format("2006-01-02")
 
 	// 保存到数据库
-	aiSummary := &database.AILearningSummary{
+	aiSummary := &models.AILearningSummary{
 		TraderID:       at.id,
 		SummaryContent: summary,
 		TradesCount:    len(trades),
@@ -1675,7 +1724,7 @@ func (at *AutoTrader) maybeGenerateAILearningSummary() {
 }
 
 // buildTradeAnalysisPrompt 构建交易分析prompt
-func (at *AutoTrader) buildTradeAnalysisPrompt(trades []*database.TradeOutcome) string {
+func (at *AutoTrader) buildTradeAnalysisPrompt(trades []*models.TradeOutcome) string {
 	var sb strings.Builder
 
 	sb.WriteString(fmt.Sprintf("# 最近%d笔交易记录\n\n", len(trades)))

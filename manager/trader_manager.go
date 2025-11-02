@@ -23,7 +23,7 @@ func NewTraderManager() *TraderManager {
 }
 
 // AddTrader 添加一个trader
-func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, maxPositions int, enableAILearning bool, aiLearnInterval int) error {
+func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, maxPositions int, enableAILearning bool, aiLearnInterval int, aiAutonomyMode bool, compactMode bool) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -31,6 +31,9 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		return fmt.Errorf("trader ID '%s' 已存在", cfg.ID)
 	}
 
+	// 调试：打印接收到的参数
+	log.Printf("[DEBUG] AddTrader接收: aiAutonomyMode=%v compactMode=%v", aiAutonomyMode, compactMode)
+	
 	// 构建AutoTraderConfig
 	traderConfig := trader.AutoTraderConfig{
 		ID:                    cfg.ID,
@@ -59,6 +62,8 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		MaxPositions:          maxPositions,             // 使用配置的最大持仓数
 		EnableAILearning:      enableAILearning,         // AI学习开关
 		AILearnInterval:       aiLearnInterval,          // AI学习间隔
+		AIAutonomyMode:        aiAutonomyMode,           // AI自主模式
+		CompactMode:           compactMode,              // 数据优化模式
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
@@ -207,23 +212,46 @@ func (tm *TraderManager) ReloadConfig(newConfig *config.Config) error {
 			continue
 		}
 
-		// 如果trader已存在，保留它
+		// 检查trader是否需要重新创建
+		needRecreate := false
 		if existingTrader, exists := oldTraders[traderCfg.ID]; exists {
-			log.Printf("✓ Trader '%s' 已存在，保留", traderCfg.ID)
-			newTraders[traderCfg.ID] = existingTrader
-			delete(oldTraders, traderCfg.ID)
+			// 检查关键配置是否改变（API密钥、交易所等）
+			status := existingTrader.GetStatus()
+			if traderCfg.Exchange != status["exchange"] ||
+				traderCfg.BinanceAPIKey != "" && !isMaskedKey(traderCfg.BinanceAPIKey) ||
+				traderCfg.BinanceSecretKey != "" && !isMaskedKey(traderCfg.BinanceSecretKey) ||
+				traderCfg.HyperliquidPrivateKey != "" && !isMaskedKey(traderCfg.HyperliquidPrivateKey) ||
+				traderCfg.QwenKey != "" && !isMaskedKey(traderCfg.QwenKey) ||
+				traderCfg.DeepSeekKey != "" && !isMaskedKey(traderCfg.DeepSeekKey) {
+				
+				log.Printf("🔄 Trader '%s' 配置有变化（密钥或交易所），需要重新创建", traderCfg.ID)
+				existingTrader.Stop()
+				delete(tm.traders, traderCfg.ID) // 从map中删除旧trader
+				needRecreate = true
+			} else {
+				log.Printf("✓ Trader '%s' 配置无变化，保留", traderCfg.ID)
+				newTraders[traderCfg.ID] = existingTrader
+				delete(oldTraders, traderCfg.ID)
+			}
 		} else {
+			needRecreate = true
+		}
+
+		if needRecreate {
 			// 创建新trader
-			log.Printf("➕ 创建新Trader: %s", traderCfg.ID)
+			log.Printf("➕ 创建Trader: %s", traderCfg.ID)
 			err := tm.addTraderUnlocked(traderCfg, coinPoolURL, 
 				newConfig.MaxDailyLoss, newConfig.MaxDrawdown, 
 				newConfig.StopTradingMinutes, newConfig.Leverage, 
-				newConfig.MaxPositions)
+				newConfig.MaxPositions, 
+				newConfig.EnableAILearning, newConfig.AILearnInterval,
+				traderCfg.AIAutonomyMode, traderCfg.CompactMode)
 			if err != nil {
 				log.Printf("❌ 创建Trader %s 失败: %v", traderCfg.ID, err)
 				continue
 			}
 			newTraders[traderCfg.ID] = tm.traders[traderCfg.ID]
+			log.Printf("▶️  Trader '%s' 已创建并启动", traderCfg.ID)
 		}
 	}
 
@@ -240,12 +268,20 @@ func (tm *TraderManager) ReloadConfig(newConfig *config.Config) error {
 	return nil
 }
 
+// isMaskedKey 检查密钥是否是脱敏后的值
+func isMaskedKey(key string) bool {
+	return key == "****" || len(key) > 4 && key[len(key)/2-2:len(key)/2+2] == "****"
+}
+
 // addTraderUnlocked 添加trader（不加锁版本，供ReloadConfig使用）
-func (tm *TraderManager) addTraderUnlocked(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, maxPositions int) error {
+func (tm *TraderManager) addTraderUnlocked(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, maxPositions int, enableAILearning bool, aiLearnInterval int, aiAutonomyMode bool, compactMode bool) error {
 	if _, exists := tm.traders[cfg.ID]; exists {
 		return fmt.Errorf("trader ID '%s' 已存在", cfg.ID)
 	}
 
+	// 调试：打印接收到的参数
+	log.Printf("[DEBUG] AddTrader接收: aiAutonomyMode=%v compactMode=%v", aiAutonomyMode, compactMode)
+	
 	// 构建AutoTraderConfig
 	traderConfig := trader.AutoTraderConfig{
 		ID:                    cfg.ID,
@@ -272,6 +308,9 @@ func (tm *TraderManager) addTraderUnlocked(cfg config.TraderConfig, coinPoolURL 
 		BTCETHLeverage:        leverage.BTCETHLeverage,
 		AltcoinLeverage:       leverage.AltcoinLeverage,
 		MaxPositions:          maxPositions,
+		EnableAILearning:      enableAILearning,
+		AILearnInterval:       aiLearnInterval,
+		AIAutonomyMode:        aiAutonomyMode,
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,

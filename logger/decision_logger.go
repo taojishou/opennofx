@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"nofx/database"
+	"nofx/database/models"
 	"os"
 	"path/filepath"
 	"time"
@@ -68,14 +69,14 @@ type DecisionAction struct {
 type DecisionLogger struct {
 	logDir      string
 	cycleNumber int
-	db          *database.DB // SQLite数据库连接
+	db          *database.DB // 数据库连接
 	traderID    string       // Trader ID
 }
 
 // NewDecisionLogger 创建决策日志记录器
 func NewDecisionLogger(logDir string) *DecisionLogger {
 	if logDir == "" {
-		logDir = "decision_logs"
+		logDir = "data/traders/default"
 	}
 
 	// 确保日志目录存在
@@ -135,7 +136,7 @@ func (l *DecisionLogger) saveToDatabase(record *DecisionRecord) error {
 	}
 
 	// 插入主记录
-	dbRecord := &database.DecisionRecord{
+	dbRecord := &models.DecisionRecord{
 		TraderID:              l.traderID,
 		CycleNumber:           record.CycleNumber,
 		Timestamp:             record.Timestamp,
@@ -152,14 +153,14 @@ func (l *DecisionLogger) saveToDatabase(record *DecisionRecord) error {
 		MarginUsedPct:         record.AccountState.MarginUsedPct,
 	}
 
-	recordID, err := l.db.InsertDecisionRecord(dbRecord)
+	recordID, err := l.db.Decision().Insert(dbRecord)
 	if err != nil {
 		return fmt.Errorf("插入决策记录失败: %w", err)
 	}
 
 	// 插入决策动作
 	for _, action := range record.Decisions {
-		dbAction := &database.DecisionAction{
+		dbAction := &models.DecisionAction{
 			RecordID:    recordID,
 			Action:      action.Action,
 			Symbol:      action.Symbol,
@@ -172,14 +173,14 @@ func (l *DecisionLogger) saveToDatabase(record *DecisionRecord) error {
 			Error:       action.Error,
 			WasStopLoss: action.WasStopLoss,
 		}
-		if err := l.db.InsertDecisionAction(dbAction); err != nil {
+		if err := l.db.Decision().InsertAction(dbAction); err != nil {
 			return fmt.Errorf("插入决策动作失败: %w", err)
 		}
 	}
 
 	// 插入持仓快照
 	for _, pos := range record.Positions {
-		dbPos := &database.PositionSnapshot{
+		dbPos := &models.PositionSnapshot{
 			RecordID:         recordID,
 			Symbol:           pos.Symbol,
 			Side:             pos.Side,
@@ -190,14 +191,14 @@ func (l *DecisionLogger) saveToDatabase(record *DecisionRecord) error {
 			Leverage:         pos.Leverage,
 			LiquidationPrice: pos.LiquidationPrice,
 		}
-		if err := l.db.InsertPositionSnapshot(dbPos); err != nil {
+		if err := l.db.Decision().InsertPositionSnapshot(dbPos); err != nil {
 			return fmt.Errorf("插入持仓快照失败: %w", err)
 		}
 	}
 
 	// 插入候选币种
 	for _, symbol := range record.CandidateCoins {
-		if err := l.db.InsertCandidateCoin(recordID, symbol); err != nil {
+		if err := l.db.Decision().InsertCandidateCoin(recordID, symbol); err != nil {
 			return fmt.Errorf("插入候选币种失败: %w", err)
 		}
 	}
@@ -211,7 +212,7 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 		return nil, fmt.Errorf("数据库未初始化")
 	}
 
-	dbRecords, err := l.db.GetLatestRecords(n)
+	dbRecords, err := l.db.Decision().GetLatest(n)
 	if err != nil {
 		return nil, err
 	}
@@ -220,10 +221,10 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 	records := make([]*DecisionRecord, len(dbRecords))
 	for i, dbRec := range dbRecords {
 		// 从数据库加载该记录的所有决策动作
-		actions, err := l.db.QueryActions(dbRec.ID)
+		actions, err := l.db.Decision().GetActions(dbRec.ID)
 		if err != nil {
 			log.Printf("⚠️ 加载record %d 的决策动作失败: %v", dbRec.ID, err)
-			actions = []*database.DecisionAction{} // 使用空数组
+			actions = []*models.DecisionAction{} // 使用空数组
 		}
 		
 		// 转换decision actions
@@ -464,7 +465,7 @@ func (l *DecisionLogger) analyzePerformanceFromDB(lookbackCycles int) (*Performa
 	}
 
 	// 优先从 trade_outcomes 表读取（如果有数据）
-	dbTrades, err := l.db.GetTradeOutcomes(lookbackCycles * 10)
+	dbTrades, err := l.db.Trade().GetLatest(lookbackCycles * 10)
 	if err != nil {
 		return nil, fmt.Errorf("从数据库读取交易记录失败: %w", err)
 	}
@@ -606,7 +607,7 @@ func (l *DecisionLogger) analyzePerformanceFromDB(lookbackCycles int) (*Performa
 	}())
 
 	// 从数据库获取最近的决策记录，计算夏普比率
-	records, err := l.db.GetLatestRecords(lookbackCycles)
+	records, err := l.db.Decision().GetLatest(lookbackCycles)
 	if err == nil && len(records) > 0 {
 		analysis.SharpeRatio = l.calculateSharpeRatioFromDB(records)
 	}
@@ -615,7 +616,7 @@ func (l *DecisionLogger) analyzePerformanceFromDB(lookbackCycles int) (*Performa
 }
 
 // calculateSharpeRatioFromDB 从数据库记录计算夏普比率
-func (l *DecisionLogger) calculateSharpeRatioFromDB(records []*database.DecisionRecord) float64 {
+func (l *DecisionLogger) calculateSharpeRatioFromDB(records []*models.DecisionRecord) float64 {
 	if len(records) < 2 {
 		return 0.0
 	}
@@ -680,7 +681,7 @@ func (l *DecisionLogger) analyzeFromDecisionActions(lookbackCycles int) (*Perfor
 	}
 
 	// 获取最近的决策记录
-	records, err := l.db.GetLatestRecords(lookbackCycles * 3) // 扩大窗口确保捕获完整交易
+	records, err := l.db.Decision().GetLatest(lookbackCycles * 3) // 扩大窗口确保捕获完整交易
 	if err != nil {
 		return nil, fmt.Errorf("读取决策记录失败: %w", err)
 	}
@@ -913,12 +914,12 @@ func (l *DecisionLogger) analyzeFromDecisionActions(lookbackCycles int) (*Perfor
 }
 
 // getActionsForRecord 获取指定记录的所有决策动作
-func (l *DecisionLogger) getActionsForRecord(recordID int64) ([]*database.DecisionAction, error) {
+func (l *DecisionLogger) getActionsForRecord(recordID int64) ([]*models.DecisionAction, error) {
 	if l.db == nil {
 		return nil, fmt.Errorf("数据库未初始化")
 	}
 
-	return l.db.QueryActions(recordID)
+	return l.db.Decision().GetActions(recordID)
 }
 
 // SaveTradeOutcome 保存交易结果到数据库
@@ -927,7 +928,7 @@ func (l *DecisionLogger) SaveTradeOutcome(trade *TradeOutcome) error {
 		return nil // 数据库不可用，跳过
 	}
 
-	dbTrade := &database.TradeOutcome{
+	dbTrade := &models.TradeOutcome{
 		TraderID:        l.traderID,
 		Symbol:          trade.Symbol,
 		Side:            trade.Side,
@@ -949,7 +950,28 @@ func (l *DecisionLogger) SaveTradeOutcome(trade *TradeOutcome) error {
 		FailureType:     trade.FailureType,
 	}
 
-	return l.db.InsertTradeOutcome(dbTrade)
+	dbTradeModel := &models.TradeOutcome{
+		TraderID:        dbTrade.TraderID,
+		Symbol:          dbTrade.Symbol,
+		Side:            dbTrade.Side,
+		Quantity:        dbTrade.Quantity,
+		Leverage:        dbTrade.Leverage,
+		OpenPrice:       dbTrade.OpenPrice,
+		ClosePrice:      dbTrade.ClosePrice,
+		PositionValue:   dbTrade.PositionValue,
+		MarginUsed:      dbTrade.MarginUsed,
+		PnL:             dbTrade.PnL,
+		PnLPct:          dbTrade.PnLPct,
+		DurationMinutes: dbTrade.DurationMinutes,
+		OpenTime:        dbTrade.OpenTime,
+		CloseTime:       dbTrade.CloseTime,
+		WasStopLoss:     dbTrade.WasStopLoss,
+		EntryReason:     dbTrade.EntryReason,
+		ExitReason:      dbTrade.ExitReason,
+		IsPremature:     dbTrade.IsPremature,
+		FailureType:     dbTrade.FailureType,
+	}
+	return l.db.Trade().Insert(dbTradeModel)
 }
 
 // calculateSharpeRatio 计算夏普比率

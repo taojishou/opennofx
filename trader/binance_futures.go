@@ -2,8 +2,11 @@ package trader
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -650,4 +653,77 @@ func stringContains(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// LongShortRatio 多空比数据结构
+type LongShortRatio struct {
+	Symbol         string    `json:"symbol"`
+	LongShortRatio float64   `json:"longShortRatio"` // 多头账户比例/空头账户比例
+	LongAccount    float64   `json:"longAccount"`    // 多头账户占比
+	ShortAccount   float64   `json:"shortAccount"`   // 空头账户占比
+	Timestamp      int64     `json:"timestamp"`
+}
+
+// GetLongShortRatio 获取全局多空账户比
+// period: 5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d
+func (t *FuturesTrader) GetLongShortRatio(symbol string, period string) (*LongShortRatio, error) {
+	url := fmt.Sprintf("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=%s&period=%s&limit=1", symbol, period)
+	
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("请求多空比API失败: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+	
+	var results []struct {
+		Symbol         string `json:"symbol"`
+		LongShortRatio string `json:"longShortRatio"`
+		LongAccount    string `json:"longAccount"`
+		ShortAccount   string `json:"shortAccount"`
+		Timestamp      int64  `json:"timestamp"`
+	}
+	
+	if err := json.Unmarshal(body, &results); err != nil {
+		return nil, fmt.Errorf("解析JSON失败: %w", err)
+	}
+	
+	if len(results) == 0 {
+		return nil, fmt.Errorf("没有返回数据")
+	}
+	
+	result := results[0]
+	
+	ratio, _ := strconv.ParseFloat(result.LongShortRatio, 64)
+	longAcc, _ := strconv.ParseFloat(result.LongAccount, 64)
+	shortAcc, _ := strconv.ParseFloat(result.ShortAccount, 64)
+	
+	return &LongShortRatio{
+		Symbol:         result.Symbol,
+		LongShortRatio: ratio,
+		LongAccount:    longAcc,
+		ShortAccount:   shortAcc,
+		Timestamp:      result.Timestamp,
+	}, nil
+}
+
+// GetMultiPeriodLongShortRatio 获取多时间周期多空比
+func (t *FuturesTrader) GetMultiPeriodLongShortRatio(symbol string) (map[string]*LongShortRatio, error) {
+	periods := []string{"5m", "15m", "1h", "4h"}
+	result := make(map[string]*LongShortRatio)
+	
+	for _, period := range periods {
+		ratio, err := t.GetLongShortRatio(symbol, period)
+		if err != nil {
+			log.Printf("⚠️ 获取%s周期多空比失败: %v", period, err)
+			continue
+		}
+		result[period] = ratio
+	}
+	
+	return result, nil
 }

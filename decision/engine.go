@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"nofx/database"
+	"nofx/database/models"
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"sort"
 	"strings"
 	"time"
 )
@@ -36,6 +39,11 @@ type AccountInfo struct {
 	MarginUsed       float64 `json:"margin_used"`       // 已用保证金
 	MarginUsedPct    float64 `json:"margin_used_pct"`   // 保证金使用率
 	PositionCount    int     `json:"position_count"`    // 持仓数量
+	// 风险管理相关字段
+	RiskCapacityUSD  float64 `json:"risk_capacity_usd"`  // 剩余风险容量（USD）
+	MaxRiskPerTrade  float64 `json:"max_risk_per_trade"` // 单笔最大风险（USD）
+	DailyRiskBudget  float64 `json:"daily_risk_budget"`  // 日风险预算（USD）
+	UsedRiskBudget   float64 `json:"used_risk_budget"`   // 已使用风险预算（USD）
 }
 
 // CandidateCoin 候选币种（来自币种池）
@@ -54,6 +62,20 @@ type OITopData struct {
 	NetShort          float64 // 净空仓
 }
 
+// RiskMetrics 风险管理指标
+type RiskMetrics struct {
+	VaR95             float64 `json:"var_95"`              // 95%置信度风险价值（USD）
+	VaR99             float64 `json:"var_99"`              // 99%置信度风险价值（USD）
+	MaxDrawdown       float64 `json:"max_drawdown"`        // 最大回撤（%）
+	MaxDrawdownUSD    float64 `json:"max_drawdown_usd"`    // 最大回撤（USD）
+	SharpeRatio       float64 `json:"sharpe_ratio"`        // 夏普比率
+	TotalRiskExposure float64 `json:"total_risk_exposure"` // 总风险敞口（USD）
+	LeverageRisk      float64 `json:"leverage_risk"`       // 杠杆风险评分（0-100）
+	ConcentrationRisk float64 `json:"concentration_risk"`  // 集中度风险评分（0-100）
+	LiquidationRisk   float64 `json:"liquidation_risk"`    // 强平风险评分（0-100）
+	VolatilityRisk    float64 `json:"volatility_risk"`     // 波动率风险评分（0-100）
+}
+
 // Context 交易上下文（传递给AI的完整信息）
 type Context struct {
 	CurrentTime       string                  `json:"current_time"`
@@ -62,6 +84,7 @@ type Context struct {
 	Account           AccountInfo             `json:"account"`
 	Positions         []PositionInfo          `json:"positions"`
 	CandidateCoins    []CandidateCoin         `json:"candidate_coins"`
+	RiskMetrics       RiskMetrics             `json:"risk_metrics"`       // 风险管理指标
 	MarketDataMap     map[string]*market.Data `json:"-"` // 不序列化，但内部使用
 	OITopDataMap      map[string]*OITopData   `json:"-"` // OI Top数据映射
 	Performance       interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
@@ -70,6 +93,7 @@ type Context struct {
 	MaxPositions      int                     `json:"-"` // 最大持仓数限制（从配置读取）
 	AILearningSummary string                  `json:"-"` // AI学习总结（从数据库加载）
 	DecisionLogger    interface{ GetDB() *database.DB } `json:"-"` // 决策日志记录器（用于获取数据库连接）
+	AIAutonomyMode    bool                    `json:"-"` // AI自主模式（true=完全自主，false=限制模式）
 }
 
 // Decision AI的交易决策
@@ -101,18 +125,31 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 		return nil, fmt.Errorf("获取市场数据失败: %w", err)
 	}
 
-	// 2. 构建 System Prompt（从数据库加载）和 User Prompt（动态数据）
+	// 2. 计算智能风控参数和实际仓位限制
+	smartRisk := CalculateSmartRiskParams(ctx)
+	
+	// 计算实际最大仓位（与验证逻辑完全一致）
+	baseMaxBTC := ctx.Account.TotalEquity * 30.0
+	baseMaxAlt := ctx.Account.TotalEquity * 20.0
+	actualMaxBTC := CalculateSmartPositionSize(baseMaxBTC, smartRisk, "BTCUSDT", 85)
+	actualMaxAlt := CalculateSmartPositionSize(baseMaxAlt, smartRisk, "OTHER", 85)
+	
+	// 3. 构建 System Prompt（从数据库加载）和 User Prompt（动态数据）
 	db := ctx.DecisionLogger.GetDB()
-	var systemPrompt string
-	if db != nil {
-		systemPrompt = db.BuildSystemPromptFromDB(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
-	} else {
-		// fallback到硬编码版本
-		systemPrompt = buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	if db == nil {
+		return nil, fmt.Errorf("数据库连接不可用，无法构建提示词")
 	}
-	userPrompt := buildUserPrompt(ctx)
+	
+	systemPrompt := db.BuildSystemPromptFromDB(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, actualMaxBTC, actualMaxAlt, ctx.AIAutonomyMode)
+	userPrompt, err := buildUserPrompt(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("构建用户提示词失败: %w", err)
+	}
+	
+	log.Printf("[Prompt] 实际仓位限制: BTC=%.0f USDT, 其他=%.0f USDT (账户净值%.2f, 盈亏%.1f%%, 保证金%.1f%%)", 
+		actualMaxBTC, actualMaxAlt, ctx.Account.TotalEquity, smartRisk.TotalPnLPct, smartRisk.MarginUsedPct)
 
-	// 3. 调用AI API（使用 system + user prompt）
+	// 4. 调用AI API（使用 system + user prompt）
 	aiResponse, err := mcpClient.CallWithMessages(systemPrompt, userPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("调用AI API失败: %w", err)
@@ -123,6 +160,47 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	if err != nil {
 		return nil, fmt.Errorf("解析AI响应失败: %w", err)
 	}
+	
+	// 4.5 使用真实ctx验证决策（确保使用正确的AIAutonomyMode）
+	if err := validateDecisions(decision.Decisions, ctx); err != nil {
+		return nil, fmt.Errorf("决策验证失败: %w", err)
+	}
+
+	// 5. 智能市场分析
+	marketAnalyzer := NewSmartMarketAnalyzer(ctx)
+	marketCondition := marketAnalyzer.AnalyzeMarketCondition()
+
+	// 6. 决策质量评估
+	qualityAnalyzer := NewDecisionQualityAnalyzer(ctx, marketCondition)
+	
+	// 为每个决策评估质量并记录
+	for i := range decision.Decisions {
+		quality := qualityAnalyzer.EvaluateDecisionQuality(&decision.Decisions[i])
+		
+		// 记录决策质量信息
+		log.Printf("决策 %d 质量评估: 分数=%.1f, 等级=%s", i+1, quality.Score, quality.Grade)
+		if len(quality.Issues) > 0 {
+			log.Printf("决策 %d 风险提示: %v", i+1, quality.Issues)
+		}
+		
+		// 如果决策质量过低，降低信心度
+		if quality.Grade == "poor" {
+			if decision.Decisions[i].Confidence > 30 {
+				decision.Decisions[i].Confidence = 30
+			}
+			log.Printf("决策 %d 质量较差，信心度调整为 %d", i+1, decision.Decisions[i].Confidence)
+		} else if quality.Grade == "fair" {
+			if decision.Decisions[i].Confidence > 60 {
+				decision.Decisions[i].Confidence = 60
+			}
+			log.Printf("决策 %d 质量一般，信心度调整为 %d", i+1, decision.Decisions[i].Confidence)
+		}
+	}
+
+	// 记录市场状况
+	log.Printf("市场状况分析: 趋势=%s, 波动率=%s, 情绪=%s, 风险=%s", 
+		marketCondition.Trend, marketCondition.Volatility, 
+		marketCondition.Sentiment, marketCondition.Risk)
 
 	decision.Timestamp = time.Now()
 	decision.SystemPrompt = systemPrompt // 保存system prompt
@@ -212,155 +290,117 @@ func calculateMaxCandidates(ctx *Context) int {
 	return len(ctx.CandidateCoins)
 }
 
-// buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
-func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
-	var sb strings.Builder
 
-	// === 核心使命 ===
-	sb.WriteString("你是专业的加密货币交易AI，在币安合约市场进行自主交易。\n\n")
-	sb.WriteString("# 🎯 核心目标\n\n")
-	sb.WriteString("**最大化夏普比率（Sharpe Ratio）**\n\n")
-	sb.WriteString("夏普比率 = 平均收益 / 收益波动率\n\n")
-	sb.WriteString("**这意味着**：\n")
-	sb.WriteString("- ✅ 高质量交易（高胜率、大盈亏比）→ 提升夏普\n")
-	sb.WriteString("- ✅ 稳定收益、控制回撤 → 提升夏普\n")
-	sb.WriteString("- ✅ 耐心持仓、让利润奔跑 → 提升夏普\n")
-	sb.WriteString("- ❌ 频繁交易、小盈小亏 → 增加波动，严重降低夏普\n")
-	sb.WriteString("- ❌ 过度交易、手续费损耗 → 直接亏损\n")
-	sb.WriteString("- ❌ 过早平仓、频繁进出 → 错失大行情\n\n")
-	sb.WriteString("**关键认知**: 系统每3分钟扫描一次，但不意味着每次都要交易！\n")
-	sb.WriteString("大多数时候应该是 `wait` 或 `hold`，只在极佳机会时才开仓。\n\n")
-
-	// === 硬约束（风险控制）===
-	sb.WriteString("# ⚖️ 硬约束（风险控制）\n\n")
-	sb.WriteString("1. **风险回报比**: 必须 ≥ 1:3（冒1%风险，赚3%+收益）\n")
-	sb.WriteString("2. **最多持仓**: 3个币种（质量>数量）\n")
-	sb.WriteString(fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
-		accountEquity*0.8, accountEquity*1.5, altcoinLeverage, accountEquity*5, accountEquity*10, btcEthLeverage))
-	sb.WriteString("4. **保证金**: 总使用率 ≤ 90%\n\n")
-
-	// === 做空激励 ===
-	sb.WriteString("# 📉 做多做空平衡\n\n")
-	sb.WriteString("**重要**: 下跌趋势做空的利润 = 上涨趋势做多的利润\n\n")
-	sb.WriteString("- 上涨趋势 → 做多\n")
-	sb.WriteString("- 下跌趋势 → 做空\n")
-	sb.WriteString("- 震荡市场 → 观望\n\n")
-	sb.WriteString("**不要有做多偏见！做空是你的核心工具之一**\n\n")
-
-	// === 交易频率认知 ===
-	sb.WriteString("# ⏱️ 交易频率认知\n\n")
-	sb.WriteString("**量化标准**:\n")
-	sb.WriteString("- 优秀交易员：每天2-4笔 = 每小时0.1-0.2笔\n")
-	sb.WriteString("- 过度交易：每小时>2笔 = 严重问题\n")
-	sb.WriteString("- 最佳节奏：开仓后持有至少30-60分钟\n\n")
-	sb.WriteString("**自查**:\n")
-	sb.WriteString("如果你发现自己每个周期都在交易 → 说明标准太低\n")
-	sb.WriteString("如果你发现持仓<30分钟就平仓 → 说明太急躁\n\n")
-
-	// === 开仓信号强度 ===
-	sb.WriteString("# 🎯 开仓标准（严格）\n\n")
-	sb.WriteString("只在**强信号**时开仓，不确定就观望。\n\n")
-	sb.WriteString("**你拥有的完整数据**：\n")
-	sb.WriteString("- 📊 **原始序列**：3分钟价格序列(MidPrices数组) + 4小时K线序列\n")
-	sb.WriteString("- 📈 **技术序列**：EMA20序列、MACD序列、RSI7序列、RSI14序列\n")
-	sb.WriteString("- 💰 **资金序列**：成交量序列、持仓量(OI)序列、资金费率\n")
-	sb.WriteString("- 🎯 **筛选标记**：AI500评分 / OI_Top排名（如果有标注）\n\n")
-	sb.WriteString("**分析方法**（完全由你自主决定）：\n")
-	sb.WriteString("- 自由运用序列数据，你可以做但不限于趋势分析、形态识别、支撑阻力、技术阻力位、斐波那契、波动带计算\n")
-	sb.WriteString("- 多维度交叉验证（价格+量+OI+指标+序列形态）\n")
-	sb.WriteString("- 用你认为最有效的方法发现高确定性机会\n")
-	sb.WriteString("- 综合信心度 ≥ 75 才开仓\n\n")
-	sb.WriteString("**避免低质量信号**：\n")
-	sb.WriteString("- 单一维度（只看一个指标）\n")
-	sb.WriteString("- 相互矛盾（涨但量萎缩）\n")
-	sb.WriteString("- 横盘震荡\n")
-	sb.WriteString("- 刚平仓不久（<15分钟）\n\n")
-
-	// === 夏普比率自我进化 ===
-	sb.WriteString("# 🧬 夏普比率自我进化\n\n")
-	sb.WriteString("每次你会收到**夏普比率**作为绩效反馈（周期级别）：\n\n")
-	sb.WriteString("**夏普比率 < -0.5** (持续亏损):\n")
-	sb.WriteString("  → 🛑 停止交易，连续观望至少6个周期（18分钟）\n")
-	sb.WriteString("  → 🔍 深度反思：\n")
-	sb.WriteString("     • 交易频率过高？（每小时>2次就是过度）\n")
-	sb.WriteString("     • 持仓时间过短？（<30分钟就是过早平仓）\n")
-	sb.WriteString("     • 信号强度不足？（信心度<75）\n")
-	sb.WriteString("     • 是否在做空？（单边做多是错误的）\n\n")
-	sb.WriteString("**夏普比率 -0.5 ~ 0** (轻微亏损):\n")
-	sb.WriteString("  → ⚠️ 严格控制：只做信心度>80的交易\n")
-	sb.WriteString("  → 减少交易频率：每小时最多1笔新开仓\n")
-	sb.WriteString("  → 耐心持仓：至少持有30分钟以上\n\n")
-	sb.WriteString("**夏普比率 0 ~ 0.7** (正收益):\n")
-	sb.WriteString("  → ✅ 维持当前策略\n\n")
-	sb.WriteString("**夏普比率 > 0.7** (优异表现):\n")
-	sb.WriteString("  → 🚀 可适度扩大仓位\n\n")
-	sb.WriteString("**关键**: 夏普比率是唯一指标，它会自然惩罚频繁交易和过度进出。\n\n")
-
-	// === 决策流程 ===
-	sb.WriteString("# 📋 决策流程\n\n")
-	sb.WriteString("1. **分析夏普比率**: 当前策略是否有效？需要调整吗？\n")
-	sb.WriteString("2. **评估持仓**: 趋势是否改变？是否该止盈/止损？\n")
-	sb.WriteString("3. **寻找新机会**: 有强信号吗？多空机会？\n")
-	sb.WriteString("4. **输出决策**: 思维链分析 + JSON\n\n")
-
-	// === 输出格式 ===
-	sb.WriteString("# 📤 输出格式\n\n")
-	sb.WriteString("**第一步: 思维链（纯文本）**\n")
-	sb.WriteString("简洁分析你的思考过程\n\n")
-	sb.WriteString("**第二步: JSON决策数组**\n\n")
-	sb.WriteString("```json\n[\n")
-	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage, accountEquity*5))
-	sb.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\", \"reasoning\": \"止盈离场\"}\n")
-	sb.WriteString("]\n```\n\n")
-	sb.WriteString("**字段说明**:\n")
-	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait\n")
-	sb.WriteString("- `confidence`: 0-100（开仓建议≥75）\n")
-	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n\n")
-
-	// === 关键提醒 ===
-	sb.WriteString("---\n\n")
-	sb.WriteString("**记住**: \n")
-	sb.WriteString("- 目标是夏普比率，不是交易频率\n")
-	sb.WriteString("- 做空 = 做多，都是赚钱工具\n")
-	sb.WriteString("- 宁可错过，不做低质量交易\n")
-	sb.WriteString("- 风险回报比1:3是底线\n")
-
-	return sb.String()
-}
 
 // buildUserPrompt 构建 User Prompt（动态数据）
-func buildUserPrompt(ctx *Context) string {
-	var sb strings.Builder
-
-	// 系统状态
-	sb.WriteString(fmt.Sprintf("**时间**: %s | **周期**: #%d | **运行**: %d分钟\n\n",
-		ctx.CurrentTime, ctx.CallCount, ctx.RuntimeMinutes))
-
-	// BTC 市场
-	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
-		sb.WriteString(fmt.Sprintf("**BTC**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
-			btcData.CurrentPrice, btcData.PriceChange1h, btcData.PriceChange4h,
-			btcData.CurrentMACD, btcData.CurrentRSI7))
+func buildUserPrompt(ctx *Context) (string, error) {
+	// 获取数据库连接
+	var db *database.DB
+	if ctx.DecisionLogger != nil {
+		db = ctx.DecisionLogger.GetDB()
 	}
+	
+	if db == nil {
+		return "", fmt.Errorf("数据库连接不可用，无法构建用户提示词")
+	}
+	
+	// 从数据库获取用户提示词模板
+	templates, err := db.GetUserPromptTemplates()
+	if err != nil {
+		return "", fmt.Errorf("获取用户提示词模板失败: %w", err)
+	}
+	
+	var sb strings.Builder
+	
+	// 准备模板数据
+	templateData := buildTemplateData(ctx)
+	
+	// 按照display_order顺序处理模板
+	for _, tmpl := range templates {
+		content := renderTemplate(tmpl.Content, templateData, ctx)
+		if content != "" {
+			sb.WriteString(content)
+			sb.WriteString("\n\n")
+		}
+	}
+	
+	return sb.String(), nil
+}
 
-	// 账户
-	sb.WriteString(fmt.Sprintf("**账户**: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n\n",
-		ctx.Account.TotalEquity,
-		ctx.Account.AvailableBalance,
-		(ctx.Account.AvailableBalance/ctx.Account.TotalEquity)*100,
-		ctx.Account.TotalPnLPct,
-		ctx.Account.MarginUsedPct,
-		ctx.Account.PositionCount))
+// buildTemplateData 构建模板数据
+func buildTemplateData(ctx *Context) map[string]interface{} {
+	data := make(map[string]interface{})
+	
+	// 基础数据
+	data["Time"] = ctx.CurrentTime
+	data["CycleNumber"] = ctx.CallCount
+	data["RuntimeMinutes"] = ctx.RuntimeMinutes
+	data["CandidateCount"] = len(ctx.MarketDataMap)
+	data["PositionCount"] = ctx.Account.PositionCount
+	
+	// BTC数据
+	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
+		data["BTCPrice"] = fmt.Sprintf("%.2f", btcData.CurrentPrice)
+		data["BTC1hChange"] = fmt.Sprintf("%+.2f", btcData.PriceChange1h)
+		data["BTC4hChange"] = fmt.Sprintf("%+.2f", btcData.PriceChange4h)
+		data["BTCMACD"] = fmt.Sprintf("%.4f", btcData.CurrentMACD)
+		data["BTCRSI"] = fmt.Sprintf("%.2f", btcData.CurrentRSI7)
+	}
+	
+	// 账户数据
+	data["NetValue"] = fmt.Sprintf("%.2f", ctx.Account.TotalEquity)
+	data["Balance"] = fmt.Sprintf("%.2f", ctx.Account.AvailableBalance)
+	data["BalancePercent"] = fmt.Sprintf("%.1f", (ctx.Account.AvailableBalance/ctx.Account.TotalEquity)*100)
+	data["PnLPercent"] = fmt.Sprintf("%+.2f", ctx.Account.TotalPnLPct)
+	data["MarginPercent"] = fmt.Sprintf("%.1f", ctx.Account.MarginUsedPct)
+	
+	// 夏普比率
+	if ctx.Performance != nil {
+		type PerformanceData struct {
+			SharpeRatio float64 `json:"sharpe_ratio"`
+		}
+		var perfData PerformanceData
+		if jsonData, err := json.Marshal(ctx.Performance); err == nil {
+			if err := json.Unmarshal(jsonData, &perfData); err == nil {
+				data["SharpeRatio"] = fmt.Sprintf("%.2f", perfData.SharpeRatio)
+			}
+		}
+	}
+	
+	return data
+}
 
-	// 持仓（完整市场数据）
-	if len(ctx.Positions) > 0 {
-		sb.WriteString("## 当前持仓\n")
+// renderTemplate 渲染模板内容
+func renderTemplate(template string, data map[string]interface{}, ctx *Context) string {
+	content := template
+	
+	// 简单的字符串替换
+	for key, value := range data {
+		placeholder := fmt.Sprintf("{{.%s}}", key)
+		content = strings.ReplaceAll(content, placeholder, fmt.Sprintf("%v", value))
+	}
+	
+	// 处理特殊的动态内容
+	content = renderSpecialContent(content, ctx)
+	
+	return content
+}
+
+// renderSpecialContent 处理特殊的动态内容
+func renderSpecialContent(content string, ctx *Context) string {
+	// 如果是持仓标题，需要检查是否有持仓
+	if strings.Contains(content, "## 当前持仓") && len(ctx.Positions) > 0 {
+		// 添加持仓详情
+		var positionDetails strings.Builder
+		positionDetails.WriteString(content)
+		positionDetails.WriteString("\n")
+		
 		for i, pos := range ctx.Positions {
 			// 计算持仓时长
 			holdingDuration := ""
 			if pos.UpdateTime > 0 {
 				durationMs := time.Now().UnixMilli() - pos.UpdateTime
-				durationMin := durationMs / (1000 * 60) // 转换为分钟
+				durationMin := durationMs / (1000 * 60)
 				if durationMin < 60 {
 					holdingDuration = fmt.Sprintf(" | 持仓时长%d分钟", durationMin)
 				} else {
@@ -370,97 +410,74 @@ func buildUserPrompt(ctx *Context) string {
 				}
 			}
 
-			sb.WriteString(fmt.Sprintf("%d. %s %s | 入场价%.4f 当前价%.4f | 盈亏%+.2f%% | 杠杆%dx | 保证金%.0f | 强平价%.4f%s\n\n",
+			positionDetails.WriteString(fmt.Sprintf("%d. %s %s | 入场价%.4f 当前价%.4f | 盈亏%+.2f%% | 杠杆%dx | 保证金%.0f | 强平价%.4f%s\n\n",
 				i+1, pos.Symbol, strings.ToUpper(pos.Side),
 				pos.EntryPrice, pos.MarkPrice, pos.UnrealizedPnLPct,
 				pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
 
-			// 使用FormatMarketData输出完整市场数据
+			// 添加市场数据（精简格式）
 			if marketData, ok := ctx.MarketDataMap[pos.Symbol]; ok {
-				sb.WriteString(market.Format(marketData))
-				sb.WriteString("\n")
+				positionDetails.WriteString(market.FormatCompact(marketData))
+				positionDetails.WriteString("\n")
 			}
 		}
-	} else {
-		sb.WriteString("**当前持仓**: 无\n\n")
+		return positionDetails.String()
 	}
-
-	// 候选币种（完整市场数据）
-	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.MarketDataMap)))
-	displayedCount := 0
-	for _, coin := range ctx.CandidateCoins {
-		marketData, hasData := ctx.MarketDataMap[coin.Symbol]
-		if !hasData {
-			continue
-		}
-		displayedCount++
-
-		sourceTags := ""
-		if len(coin.Sources) > 1 {
-			sourceTags = " (AI500+OI_Top双重信号)"
-		} else if len(coin.Sources) == 1 && coin.Sources[0] == "oi_top" {
-			sourceTags = " (OI_Top持仓增长)"
-		}
-
-		// 候选币种显示完整市场数据（是否包含K线表格由配置决定）
-		sb.WriteString(fmt.Sprintf("### %d. %s%s\n\n", displayedCount, coin.Symbol, sourceTags))
-		sb.WriteString(market.Format(marketData))
-		sb.WriteString("\n")
-	}
-	sb.WriteString("\n")
-
-	// 夏普比率（直接传值，不要复杂格式化）
-	if ctx.Performance != nil {
-		// 直接从interface{}中提取SharpeRatio
-		type PerformanceData struct {
-			SharpeRatio float64 `json:"sharpe_ratio"`
-		}
-		var perfData PerformanceData
-		if jsonData, err := json.Marshal(ctx.Performance); err == nil {
-			if err := json.Unmarshal(jsonData, &perfData); err == nil {
-				sb.WriteString(fmt.Sprintf("## 📊 夏普比率: %.2f\n\n", perfData.SharpeRatio))
+	
+	// 如果是候选币种标题，添加候选币种详情
+	if strings.Contains(content, "## 候选币种") {
+		var candidateDetails strings.Builder
+		candidateDetails.WriteString(content)
+		candidateDetails.WriteString("\n\n")
+		
+		displayedCount := 0
+		for _, coin := range ctx.CandidateCoins {
+			marketData, hasData := ctx.MarketDataMap[coin.Symbol]
+			if !hasData {
+				continue
 			}
+			displayedCount++
+
+			sourceTags := ""
+			if len(coin.Sources) > 1 {
+				sourceTags = " (AI500+OI_Top双重信号)"
+			} else if len(coin.Sources) == 1 && coin.Sources[0] == "oi_top" {
+				sourceTags = " (OI_Top持仓增长)"
+			}
+
+			candidateDetails.WriteString(fmt.Sprintf("### %d. %s%s\n", displayedCount, coin.Symbol, sourceTags))
+			candidateDetails.WriteString(market.FormatCompact(marketData))
+			candidateDetails.WriteString("\n")
 		}
+		return candidateDetails.String()
 	}
-
-	// AI学习总结（如果有）
-	if ctx.AILearningSummary != "" {
-		sb.WriteString("## 📚 AI历史交易学习总结\n\n")
-		sb.WriteString(ctx.AILearningSummary)
-		sb.WriteString("\n\n")
+	
+	// 如果是AI学习总结，添加实际内容
+	if strings.Contains(content, "## 📚 AI历史交易学习总结") && ctx.AILearningSummary != "" {
+		return content + "\n\n" + ctx.AILearningSummary
 	}
-
-	sb.WriteString("---\n\n")
-	sb.WriteString("现在请分析并输出决策（思维链 + JSON）\n")
-
-	return sb.String()
+	
+	return content
 }
+
+
 
 // parseFullDecisionResponse 解析AI的完整决策响应
 func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int) (*FullDecision, error) {
-	// 1. 提取思维链
+	// 提取思维链
 	cotTrace := extractCoTTrace(aiResponse)
 
-	// 2. 提取JSON决策列表
+	// 提取决策JSON
 	decisions, err := extractDecisions(aiResponse)
 	if err != nil {
-		return &FullDecision{
-			CoTTrace:  cotTrace,
-			Decisions: []Decision{},
-		}, fmt.Errorf("提取决策失败: %w\n\n=== AI思维链分析 ===\n%s", err, cotTrace)
+		return nil, fmt.Errorf("提取决策失败: %w", err)
 	}
 
-	// 3. 验证决策
-	if err := validateDecisions(decisions, accountEquity, btcEthLeverage, altcoinLeverage); err != nil {
-		return &FullDecision{
-			CoTTrace:  cotTrace,
-			Decisions: decisions,
-		}, fmt.Errorf("决策验证失败: %w\n\n=== AI思维链分析 ===\n%s", err, cotTrace)
-	}
-
+	// 直接返回，不在这里验证（验证在GetFullDecision中用真实ctx进行）
 	return &FullDecision{
 		CoTTrace:  cotTrace,
 		Decisions: decisions,
+		Timestamp: time.Now(),
 	}, nil
 }
 
@@ -509,23 +526,23 @@ func extractDecisions(response string) ([]Decision, error) {
 	return decisions, nil
 }
 
-// fixMissingQuotes 替换中文引号为英文引号（避免输入法自动转换）
+// fixMissingQuotes 修复JSON中缺失的引号
 func fixMissingQuotes(jsonStr string) string {
-	jsonStr = strings.ReplaceAll(jsonStr, "\u201c", "\"") // "
-	jsonStr = strings.ReplaceAll(jsonStr, "\u201d", "\"") // "
-	jsonStr = strings.ReplaceAll(jsonStr, "\u2018", "'")  // '
-	jsonStr = strings.ReplaceAll(jsonStr, "\u2019", "'")  // '
-	return jsonStr
-}
+	// 修复action字段
+	jsonStr = strings.ReplaceAll(jsonStr, `"action": open_long`, `"action": "open_long"`)
+	jsonStr = strings.ReplaceAll(jsonStr, `"action": open_short`, `"action": "open_short"`)
+	jsonStr = strings.ReplaceAll(jsonStr, `"action": close_long`, `"action": "close_long"`)
+	jsonStr = strings.ReplaceAll(jsonStr, `"action": close_short`, `"action": "close_short"`)
+	jsonStr = strings.ReplaceAll(jsonStr, `"action": hold`, `"action": "hold"`)
+	jsonStr = strings.ReplaceAll(jsonStr, `"action": wait`, `"action": "wait"`)
 
-// validateDecisions 验证所有决策（需要账户信息和杠杆配置）
-func validateDecisions(decisions []Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
-	for i, decision := range decisions {
-		if err := validateDecision(&decision, accountEquity, btcEthLeverage, altcoinLeverage); err != nil {
-			return fmt.Errorf("决策 #%d 验证失败: %w", i+1, err)
-		}
+	// 修复symbol字段（常见币种）
+	symbols := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "DOTUSDT", "LINKUSDT", "AVAXUSDT", "MATICUSDT", "ATOMUSDT", "NEARUSDT", "FILUSDT", "LTCUSDT", "UNIUSDT", "AAVEUSDT", "SUSHIUSDT", "COMPUSDT", "MKRUSDT", "YFIUSDT", "SNXUSDT", "CRVUSDT", "1INCHUSDT", "ALPHAUSDT", "RENUSDT", "KSMUSDT", "WAVESUSDT", "ICXUSDT", "ONTUSDT", "ZILUSDT", "BATUSDT", "ZRXUSDT", "ENJUSDT", "STORJUSDT", "KNCUSDT", "LRCUSDT", "BANDUSDT", "SANDUSDT", "MANAUSDT", "CHZUSDT", "HOTUSDT", "VETUSDT", "WINUSDT", "DUSKUSDT", "DEFIUSDT", "YFIIUSDT", "AUDIOUSDT", "CTKUSDT", "AKROUSDT", "AXSUSDT", "HARDUSDT", "DNTUSDT", "STRKUSDT", "UNFIUSDT", "ROSEUSDT", "AVAUSDT", "XEMUSDT", "SKLUSDT", "GRTUSDT", "1000SHIBUSDT", "CELOUSDT", "RIFUSDT", "CKBUSDT", "FIROUSDT", "LITUSDT", "SFPUSDT", "DODOUSDT", "CAKEUSDT", "ACMUSDT", "BADGERUSDT", "FISUSDT", "OMUSDT", "PONDUSDT", "DEGOUSDT", "ALICEUSDT", "LINAUSDT", "PERPUSDT", "RAMPUSDT", "SUPERUSDT", "CFXUSDT", "EPSUSDT", "AUTOUSDT", "TKOUSDT", "PUNDIXUSDT", "TLMUSDT", "1000BTTUSDT", "BTCSTUSDT", "TRUUSDT", "DEXEUSDT", "CKBUSDT", "TWTUSDT", "FIROUSDT", "LITUSDT", "SFPUSDT", "DODOUSDT", "CAKEUSDT", "ACMUSDT", "BADGERUSDT", "FISUSDT", "OMUSDT", "PONDUSDT", "DEGOUSDT", "ALICEUSDT", "LINAUSDT", "PERPUSDT", "RAMPUSDT", "SUPERUSDT", "CFXUSDT", "EPSUSDT", "AUTOUSDT", "TKOUSDT", "PUNDIXUSDT", "TLMUSDT", "BTCSTUSDT", "TRUUSDT", "DEXEUSDT", "CKBUSDT", "TWTUSDT", "FTTUSDT", "HNTUSDT", "OCEANUSDT", "BELUSDT", "COTIUSDT", "STMXUSDT", "DENTUSDT", "ONEUSDT", "CHRUSDT", "SANDUSDT", "MANAUSDT", "ANKRUSDT", "BTSUSDT", "LITUSDT", "UNFIUSDT", "REEFUSDT", "RVNUSDT", "SFPUSDT", "XEMUSDT", "COTIUSDT", "CHRUSDT", "STMXUSDT", "DENTUSDT", "ONEUSDT", "BTCSTUSDT", "TRUUSDT", "DEXEUSDT", "CKBUSDT", "TWTUSDT", "FTTUSDT", "HNTUSDT", "OCEANUSDT", "BELUSDT", "COTIUSDT", "STMXUSDT", "DENTUSDT", "ONEUSDT", "CHRUSDT", "SANDUSDT", "MANAUSDT", "ANKRUSDT", "BTSUSDT", "LITUSDT", "UNFIUSDT", "REEFUSDT", "RVNUSDT", "SFPUSDT", "XEMUSDT", "BTCDOMUSDT", "DEFIUSDT", "ADAUSDT", "TRXUSDT", "AVAXUSDT", "UNIUSDT", "SUSHIUSDT", "COMPUSDT", "MKRUSDT", "YFIUSDT", "SNXUSDT", "CRVUSDT", "1INCHUSDT", "ALPHAUSDT", "RENUSDT", "KSMUSDT", "WAVESUSDT", "ICXUSDT", "ONTUSDT", "ZILUSDT", "BATUSDT", "ZRXUSDT", "ENJUSDT", "STORJUSDT", "KNCUSDT", "LRCUSDT", "BANDUSDT", "SANDUSDT", "MANAUSDT", "CHZUSDT", "HOTUSDT", "VETUSDT", "WINUSDT", "DUSKUSDT", "DEFIUSDT", "YFIIUSDT", "AUDIOUSDT", "CTKUSDT", "AKROUSDT", "AXSUSDT", "HARDUSDT", "DNTUSDT", "STRKUSDT", "UNFIUSDT", "ROSEUSDT", "AVAUSDT", "XEMUSDT", "SKLUSDT", "GRTUSDT", "1000SHIBUSDT", "CELOUSDT", "RIFUSDT", "CKBUSDT", "FIROUSDT", "LITUSDT", "SFPUSDT", "DODOUSDT", "CAKEUSDT", "ACMUSDT", "BADGERUSDT", "FISUSDT", "OMUSDT", "PONDUSDT", "DEGOUSDT", "ALICEUSDT", "LINAUSDT", "PERPUSDT", "RAMPUSDT", "SUPERUSDT", "CFXUSDT", "EPSUSDT", "AUTOUSDT", "TKOUSDT", "PUNDIXUSDT", "TLMUSDT", "1000BTTUSDT", "BTCSTUSDT", "TRUUSDT", "DEXEUSDT", "CKBUSDT", "TWTUSDT", "FTTUSDT", "HNTUSDT", "OCEANUSDT", "BELUSDT", "COTIUSDT", "STMXUSDT", "DENTUSDT", "ONEUSDT", "CHRUSDT", "SANDUSDT", "MANAUSDT", "ANKRUSDT", "BTSUSDT", "LITUSDT", "UNFIUSDT", "REEFUSDT", "RVNUSDT", "SFPUSDT", "XEMUSDT", "COTIUSDT", "CHRUSDT", "STMXUSDT", "DENTUSDT", "ONEUSDT", "BTCSTUSDT", "TRUUSDT", "DEXEUSDT", "CKBUSDT", "TWTUSDT", "FTTUSDT", "HNTUSDT", "OCEANUSDT", "BELUSDT", "COTIUSDT", "STMXUSDT", "DENTUSDT", "ONEUSDT", "CHRUSDT", "SANDUSDT", "MANAUSDT", "ANKRUSDT", "BTSUSDT", "LITUSDT", "UNFIUSDT", "REEFUSDT", "RVNUSDT", "SFPUSDT", "XEMUSDT", "BTCDOMUSDT", "DEFIUSDT", "TAOUSDT", "ZECUSDT", "XMRUSDT", "DASHUSDT", "ETCUSDT", "BCHUSDT", "BSVUSDT", "XRPUSDT", "EOSUSDT", "XLMUSDT", "TRXUSDT", "IOTAUSDT", "NEOUSDT", "QTUMUSDT", "ALGOUSDT", "ZECUSDT", "XMRUSDT", "DASHUSDT", "ETCUSDT", "BCHUSDT", "BSVUSDT", "XRPUSDT", "EOSUSDT", "XLMUSDT", "TRXUSDT", "IOTAUSDT", "NEOUSDT", "QTUMUSDT", "ALGOUSDT"}
+	for _, symbol := range symbols {
+		jsonStr = strings.ReplaceAll(jsonStr, `"symbol": `+symbol, `"symbol": "`+symbol+`"`)
 	}
-	return nil
+
+	return jsonStr
 }
 
 // findMatchingBracket 查找匹配的右括号
@@ -550,94 +567,1089 @@ func findMatchingBracket(s string, start int) int {
 	return -1
 }
 
+// validateDecisions 验证所有决策的有效性
+func validateDecisions(decisions []Decision, ctx *Context) error {
+	for i, decision := range decisions {
+		if err := validateDecision(&decision, ctx); err != nil {
+			return fmt.Errorf("决策 %d 验证失败: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
 // validateDecision 验证单个决策的有效性
-func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
-	// 验证action
-	validActions := map[string]bool{
-		"open_long":   true,
-		"open_short":  true,
-		"close_long":  true,
-		"close_short": true,
-		"hold":        true,
-		"wait":        true,
+func validateDecision(decision *Decision, ctx *Context) error {
+	// 调试：打印传入的模式
+	log.Printf("[DEBUG] validateDecision: AIAutonomyMode=%v", ctx.AIAutonomyMode)
+	
+	// 🤖 AI自主模式：只做基本验证，不限制AI决策
+	if ctx.AIAutonomyMode {
+		log.Printf("🚀 [AI自主模式] 使用宽松验证，AI完全自主决策")
+		return validateDecisionAutonomy(decision, ctx)
+	}
+	
+	// 🔧 限制模式：计算智能风险管理参数
+	log.Printf("🛡️ [限制模式] 使用严格风控验证")
+	smartRisk := CalculateSmartRiskParams(ctx)
+	
+	// 验证action是否有效
+	validActions := []string{"open_long", "open_short", "close_long", "close_short", "hold", "wait"}
+	isValidAction := false
+	for _, validAction := range validActions {
+		if decision.Action == validAction {
+			isValidAction = true
+			break
+		}
+	}
+	if !isValidAction {
+		return fmt.Errorf("无效的action: %s", decision.Action)
 	}
 
-	if !validActions[d.Action] {
-		return fmt.Errorf("无效的action: %s", d.Action)
-	}
-
-	// 开仓操作必须提供完整参数
-	if d.Action == "open_long" || d.Action == "open_short" {
-		// 根据币种使用配置的杠杆上限
-		maxLeverage := altcoinLeverage          // 山寨币使用配置的杠杆
-		maxPositionValue := accountEquity * 1.5 // 山寨币最多1.5倍账户净值
-		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-			maxLeverage = btcEthLeverage          // BTC和ETH使用配置的杠杆
-			maxPositionValue = accountEquity * 10 // BTC/ETH最多10倍账户净值
+	// 对于开仓操作，验证参数
+	if decision.Action == "open_long" || decision.Action == "open_short" {
+		// 验证杠杆
+		if decision.Leverage < 1 || decision.Leverage > 20 {
+			return fmt.Errorf("杠杆必须在1-20之间，当前: %d", decision.Leverage)
 		}
 
-		if d.Leverage <= 0 || d.Leverage > maxLeverage {
-			return fmt.Errorf("杠杆必须在1-%d之间（%s，当前配置上限%d倍）: %d", maxLeverage, d.Symbol, maxLeverage, d.Leverage)
+		// 验证仓位大小
+		if decision.PositionSizeUSD <= 0 {
+			return fmt.Errorf("仓位大小必须大于0: %.2f", decision.PositionSizeUSD)
 		}
-		if d.PositionSizeUSD <= 0 {
-			return fmt.Errorf("仓位大小必须大于0: %.2f", d.PositionSizeUSD)
+
+		// 🔧 优化：动态仓位大小验证（大幅提高基础限制）
+		baseMaxPositionValue := 20.0 * ctx.Account.TotalEquity // 提高基础仓位限制到20倍
+		if decision.Symbol == "BTCUSDT" || decision.Symbol == "ETHUSDT" {
+			baseMaxPositionValue = 30.0 * ctx.Account.TotalEquity // BTC/ETH提高到30倍
 		}
-		// 验证仓位价值上限（加1%容差以避免浮点数精度问题）
-		tolerance := maxPositionValue * 0.01 // 1%容差
-		if d.PositionSizeUSD > maxPositionValue+tolerance {
-			if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-				return fmt.Errorf("BTC/ETH单币种仓位价值不能超过%.0f USDT（10倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
-			} else {
-				return fmt.Errorf("山寨币单币种仓位价值不能超过%.0f USDT（1.5倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
-			}
+		
+		// 使用智能仓位计算
+		adjustedMaxPositionValue := CalculateSmartPositionSize(baseMaxPositionValue, smartRisk, decision.Symbol, decision.Confidence)
+		
+		positionValue := decision.PositionSizeUSD * float64(decision.Leverage)
+		
+		// 添加调试日志
+		log.Printf("🛡️ [限制模式-仓位验证] 币种:%s 基础限制:%.2f 调整后:%.2f AI仓位价值:%.2f 信心度:%d 账户净值:%.2f 亏损率:%.1f%% 近期表现:%.1f",
+			decision.Symbol, baseMaxPositionValue, adjustedMaxPositionValue, positionValue, 
+			decision.Confidence, ctx.Account.TotalEquity, smartRisk.TotalPnLPct, smartRisk.RecentPerformance)
+		
+		if positionValue > adjustedMaxPositionValue {
+			return fmt.Errorf("仓位价值过大: %.2f USDT (最大允许: %.2f USDT)", positionValue, adjustedMaxPositionValue)
 		}
-		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
-			return fmt.Errorf("止损和止盈必须大于0")
+
+		// 🔧 新增：单笔交易最大风险限制
+		maxSingleRisk := 0.05 * ctx.Account.TotalEquity // 5%
+		if decision.Symbol == "BTCUSDT" || decision.Symbol == "ETHUSDT" {
+			maxSingleRisk = 0.08 * ctx.Account.TotalEquity // 8%
+		}
+		
+		// 验证止损
+		if decision.StopLoss <= 0 {
+			return fmt.Errorf("必须设置止损价格")
+		}
+
+		// 验证止盈
+		if decision.TakeProfit <= 0 {
+			return fmt.Errorf("必须设置止盈价格")
 		}
 
 		// 验证止损止盈的合理性
-		if d.Action == "open_long" {
-			if d.StopLoss >= d.TakeProfit {
+		if decision.Action == "open_long" {
+			if decision.StopLoss >= decision.TakeProfit {
 				return fmt.Errorf("做多时止损价必须小于止盈价")
 			}
 		} else {
-			if d.StopLoss <= d.TakeProfit {
+			if decision.StopLoss <= decision.TakeProfit {
 				return fmt.Errorf("做空时止损价必须大于止盈价")
 			}
 		}
 
-		// 验证风险回报比（必须≥1:3）
+		// 🔧 优化：动态风险回报比验证
 		// 计算入场价（假设当前市价）
 		var entryPrice float64
-		if d.Action == "open_long" {
+		if decision.Action == "open_long" {
 			// 做多：入场价在止损和止盈之间
-			entryPrice = d.StopLoss + (d.TakeProfit-d.StopLoss)*0.2 // 假设在20%位置入场
+			entryPrice = decision.StopLoss + (decision.TakeProfit-decision.StopLoss)*0.2 // 假设在20%位置入场
 		} else {
 			// 做空：入场价在止损和止盈之间
-			entryPrice = d.StopLoss - (d.StopLoss-d.TakeProfit)*0.2 // 假设在20%位置入场
+			entryPrice = decision.StopLoss - (decision.StopLoss-decision.TakeProfit)*0.2 // 假设在20%位置入场
 		}
 
 		var riskPercent, rewardPercent, riskRewardRatio float64
-		if d.Action == "open_long" {
-			riskPercent = (entryPrice - d.StopLoss) / entryPrice * 100
-			rewardPercent = (d.TakeProfit - entryPrice) / entryPrice * 100
+		if decision.Action == "open_long" {
+			riskPercent = (entryPrice - decision.StopLoss) / entryPrice * 100
+			rewardPercent = (decision.TakeProfit - entryPrice) / entryPrice * 100
 			if riskPercent > 0 {
 				riskRewardRatio = rewardPercent / riskPercent
 			}
 		} else {
-			riskPercent = (d.StopLoss - entryPrice) / entryPrice * 100
-			rewardPercent = (entryPrice - d.TakeProfit) / entryPrice * 100
+			riskPercent = (decision.StopLoss - entryPrice) / entryPrice * 100
+			rewardPercent = (entryPrice - decision.TakeProfit) / entryPrice * 100
 			if riskPercent > 0 {
 				riskRewardRatio = rewardPercent / riskPercent
 			}
 		}
 
-		// 硬约束：风险回报比必须≥3.0
-		if riskRewardRatio < 3.0 {
-			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥3.0:1 [风险:%.2f%% 收益:%.2f%%] [止损:%.2f 止盈:%.2f]",
-				riskRewardRatio, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)
+		// 🔧 优化：根据币种和信心度调整最小风险回报比
+		minRiskReward := 3.0 // 默认3:1
+		if decision.Symbol == "BTCUSDT" || decision.Symbol == "ETHUSDT" {
+			minRiskReward = 1.8 // BTC/ETH降低到1.8:1
+		}
+		
+		// 根据信心度调整
+		if decision.Confidence >= 80 {
+			minRiskReward *= 0.8 // 高信心度时降低要求
+		} else if decision.Confidence < 60 {
+			minRiskReward *= 1.2 // 低信心度时提高要求
+		}
+		
+		// 根据最近表现调整
+		if smartRisk.RecentPerformance > 70 {
+			minRiskReward *= 0.9 // 表现好时稍微降低要求
+		} else if smartRisk.RecentPerformance < 30 {
+			minRiskReward *= 1.3 // 表现差时提高要求
+		}
+
+		if riskRewardRatio < minRiskReward {
+			return fmt.Errorf("风险回报比过低: %.2f (最小要求: %.2f)", riskRewardRatio, minRiskReward)
+		}
+
+		// 🔧 新增：单笔最大风险限制验证
+		estimatedRisk := decision.PositionSizeUSD * (riskPercent / 100) / float64(decision.Leverage)
+		if estimatedRisk > maxSingleRisk {
+			return fmt.Errorf("单笔风险过高(%.2f USDT)，最大允许%.2f USDT（%.1f%%账户净值）", 
+				estimatedRisk, maxSingleRisk, (maxSingleRisk/ctx.Account.TotalEquity)*100)
 		}
 	}
 
 	return nil
 }
+
+// validateDecisionAutonomy AI自主模式下的验证（只做基本安全检查）
+func validateDecisionAutonomy(decision *Decision, ctx *Context) error {
+	// 验证action是否有效
+	validActions := map[string]bool{
+		"open_long": true, "open_short": true,
+		"close_long": true, "close_short": true,
+		"hold": true, "wait": true,
+	}
+	if !validActions[decision.Action] {
+		return fmt.Errorf("无效的action: %s", decision.Action)
+	}
+
+	// 对于开仓操作，只做基本数值验证
+	if decision.Action == "open_long" || decision.Action == "open_short" {
+		// 验证数值合法性（非负、非NaN）
+		if decision.Leverage < 1 {
+			return fmt.Errorf("杠杆必须大于0，当前: %d", decision.Leverage)
+		}
+		if decision.PositionSizeUSD < 0 {
+			return fmt.Errorf("仓位大小不能为负数: %.2f", decision.PositionSizeUSD)
+		}
+		if decision.StopLoss < 0 {
+			return fmt.Errorf("止损价格不能为负数: %.2f", decision.StopLoss)
+		}
+		if decision.TakeProfit < 0 {
+			return fmt.Errorf("止盈价格不能为负数: %.2f", decision.TakeProfit)
+		}
+		
+		// 验证止损止盈的方向正确性（防止反向设置）
+		if decision.Action == "open_long" {
+			if decision.StopLoss > 0 && decision.TakeProfit > 0 && decision.StopLoss >= decision.TakeProfit {
+				return fmt.Errorf("做多时止损价应小于止盈价")
+			}
+		} else {
+			if decision.StopLoss > 0 && decision.TakeProfit > 0 && decision.StopLoss <= decision.TakeProfit {
+				return fmt.Errorf("做空时止损价应大于止盈价")
+			}
+		}
+		
+		log.Printf("🚀 [AI自主模式] ✅ 决策验证通过: %s %s 仓位:%.2f USDT 杠杆:%dx 信心度:%d%% (无限制)",
+			decision.Action, decision.Symbol, decision.PositionSizeUSD, decision.Leverage, decision.Confidence)
+	}
+
+	return nil
+}
+
+// CalculateRiskMetrics 计算风险管理指标
+func CalculateRiskMetrics(ctx *Context) RiskMetrics {
+	metrics := RiskMetrics{}
+	
+	// 基础风险计算
+	if ctx.DecisionLogger != nil {
+		db := ctx.DecisionLogger.GetDB()
+		if db != nil {
+			// 获取最近的决策记录用于计算风险指标
+			records, err := db.Decision().GetLatest(100) // 最近100个周期
+			if err == nil && len(records) > 0 {
+				metrics.SharpeRatio = calculateSharpeRatioFromRecords(records)
+				metrics.MaxDrawdown, metrics.MaxDrawdownUSD = calculateMaxDrawdown(records)
+				metrics.VaR95, metrics.VaR99 = calculateVaR(records)
+			}
+		}
+	}
+	
+	// 计算当前持仓风险
+	metrics.TotalRiskExposure = calculateTotalRiskExposure(ctx.Positions)
+	metrics.LeverageRisk = calculateLeverageRisk(ctx.Positions, ctx.Account.TotalEquity)
+	metrics.ConcentrationRisk = calculateConcentrationRisk(ctx.Positions)
+	metrics.LiquidationRisk = calculateLiquidationRisk(ctx.Positions, ctx.Account.TotalEquity)
+	metrics.VolatilityRisk = calculateVolatilityRisk(ctx.Positions, ctx.MarketDataMap)
+	
+	return metrics
+}
+
+// calculateSharpeRatioFromRecords 从决策记录计算夏普比率
+func calculateSharpeRatioFromRecords(records []*models.DecisionRecord) float64 {
+	if len(records) < 2 {
+		return 0.0
+	}
+
+	var equities []float64
+	for _, record := range records {
+		if record.TotalBalance > 0 {
+			equities = append(equities, record.TotalBalance)
+		}
+	}
+
+	if len(equities) < 2 {
+		return 0.0
+	}
+
+	// 计算周期收益率
+	var returns []float64
+	for i := 1; i < len(equities); i++ {
+		if equities[i-1] > 0 {
+			periodReturn := (equities[i] - equities[i-1]) / equities[i-1]
+			returns = append(returns, periodReturn)
+		}
+	}
+
+	if len(returns) == 0 {
+		return 0.0
+	}
+
+	// 计算平均收益率
+	sumReturns := 0.0
+	for _, r := range returns {
+		sumReturns += r
+	}
+	meanReturn := sumReturns / float64(len(returns))
+
+	// 计算标准差
+	sumSquaredDiff := 0.0
+	for _, r := range returns {
+		diff := r - meanReturn
+		sumSquaredDiff += diff * diff
+	}
+	variance := sumSquaredDiff / float64(len(returns))
+	stdDev := math.Sqrt(variance)
+
+	if stdDev == 0 {
+		if meanReturn > 0 {
+			return 999.0
+		} else if meanReturn < 0 {
+			return -999.0
+		}
+		return 0.0
+	}
+
+	return meanReturn / stdDev
+}
+
+// calculateMaxDrawdown 计算最大回撤
+func calculateMaxDrawdown(records []*models.DecisionRecord) (float64, float64) {
+	if len(records) < 2 {
+		return 0.0, 0.0
+	}
+
+	var equities []float64
+	for _, record := range records {
+		if record.TotalBalance > 0 {
+			equities = append(equities, record.TotalBalance)
+		}
+	}
+
+	if len(equities) < 2 {
+		return 0.0, 0.0
+	}
+
+	maxDrawdownPct := 0.0
+	maxDrawdownUSD := 0.0
+	peak := equities[0]
+
+	for _, equity := range equities {
+		if equity > peak {
+			peak = equity
+		}
+		
+		drawdownUSD := peak - equity
+		drawdownPct := (drawdownUSD / peak) * 100
+		
+		if drawdownPct > maxDrawdownPct {
+			maxDrawdownPct = drawdownPct
+			maxDrawdownUSD = drawdownUSD
+		}
+	}
+
+	return maxDrawdownPct, maxDrawdownUSD
+}
+
+// calculateVaR 计算风险价值（VaR）
+func calculateVaR(records []*models.DecisionRecord) (float64, float64) {
+	if len(records) < 10 {
+		return 0.0, 0.0
+	}
+
+	var returns []float64
+	for i := 1; i < len(records); i++ {
+		if records[i-1].TotalBalance > 0 {
+			periodReturn := (records[i].TotalBalance - records[i-1].TotalBalance) / records[i-1].TotalBalance
+			returns = append(returns, periodReturn)
+		}
+	}
+
+	if len(returns) < 10 {
+		return 0.0, 0.0
+	}
+
+	// 排序收益率
+	sort.Float64s(returns)
+	
+	// 计算95%和99%置信度的VaR
+	index95 := int(float64(len(returns)) * 0.05) // 5%分位数
+	index99 := int(float64(len(returns)) * 0.01) // 1%分位数
+	
+	var95 := 0.0
+	var99 := 0.0
+	
+	if index95 < len(returns) {
+		var95 = -returns[index95] // VaR为负收益率的绝对值
+	}
+	if index99 < len(returns) {
+		var99 = -returns[index99]
+	}
+	
+	// 转换为USD金额（假设当前账户净值）
+	currentEquity := records[len(records)-1].TotalBalance
+	var95USD := var95 * currentEquity
+	var99USD := var99 * currentEquity
+	
+	return var95USD, var99USD
+}
+
+// calculateTotalRiskExposure 计算总风险敞口
+func calculateTotalRiskExposure(positions []PositionInfo) float64 {
+	totalExposure := 0.0
+	for _, pos := range positions {
+		// 风险敞口 = 持仓价值 = 数量 × 当前价格
+		exposure := math.Abs(pos.Quantity) * pos.MarkPrice
+		totalExposure += exposure
+	}
+	return totalExposure
+}
+
+// calculateLeverageRisk 计算杠杆风险评分（0-100）
+func calculateLeverageRisk(positions []PositionInfo, totalEquity float64) float64 {
+	if totalEquity <= 0 {
+		return 100.0 // 最高风险
+	}
+	
+	totalMarginUsed := 0.0
+	weightedLeverage := 0.0
+	totalPositionValue := 0.0
+	
+	for _, pos := range positions {
+		positionValue := math.Abs(pos.Quantity) * pos.MarkPrice
+		totalPositionValue += positionValue
+		totalMarginUsed += pos.MarginUsed
+		weightedLeverage += float64(pos.Leverage) * positionValue
+	}
+	
+	if totalPositionValue > 0 {
+		weightedLeverage /= totalPositionValue
+	}
+	
+	// 基于保证金使用率和平均杠杆计算风险评分
+	marginUsageRisk := (totalMarginUsed / totalEquity) * 100
+	leverageRisk := (weightedLeverage / 20.0) * 50 // 假设20倍杠杆为中等风险
+	
+	riskScore := marginUsageRisk + leverageRisk
+	if riskScore > 100 {
+		riskScore = 100
+	}
+	
+	return riskScore
+}
+
+// calculateConcentrationRisk 计算集中度风险评分（0-100）
+func calculateConcentrationRisk(positions []PositionInfo) float64 {
+	if len(positions) == 0 {
+		return 0.0
+	}
+	
+	// 计算各持仓的价值占比
+	totalValue := 0.0
+	positionValues := make([]float64, len(positions))
+	
+	for i, pos := range positions {
+		value := math.Abs(pos.Quantity) * pos.MarkPrice
+		positionValues[i] = value
+		totalValue += value
+	}
+	
+	if totalValue == 0 {
+		return 0.0
+	}
+	
+	// 计算赫芬达尔指数（HHI）
+	hhi := 0.0
+	for _, value := range positionValues {
+		share := value / totalValue
+		hhi += share * share
+	}
+	
+	// 将HHI转换为风险评分（0-100）
+	// HHI范围：1/n（完全分散）到1（完全集中）
+	// 风险评分：集中度越高，风险越大
+	riskScore := hhi * 100
+	
+	return riskScore
+}
+
+// calculateLiquidationRisk 计算强平风险评分（0-100）
+func calculateLiquidationRisk(positions []PositionInfo, totalEquity float64) float64 {
+	if len(positions) == 0 || totalEquity <= 0 {
+		return 0.0
+	}
+	
+	minDistanceToLiquidation := math.Inf(1)
+	
+	for _, pos := range positions {
+		if pos.LiquidationPrice <= 0 || pos.MarkPrice <= 0 {
+			continue
+		}
+		
+		// 计算到强平价的距离（百分比）
+		var distancePct float64
+		if pos.Side == "long" {
+			distancePct = (pos.MarkPrice - pos.LiquidationPrice) / pos.MarkPrice * 100
+		} else {
+			distancePct = (pos.LiquidationPrice - pos.MarkPrice) / pos.MarkPrice * 100
+		}
+		
+		if distancePct < minDistanceToLiquidation {
+			minDistanceToLiquidation = distancePct
+		}
+	}
+	
+	if math.IsInf(minDistanceToLiquidation, 1) {
+		return 0.0
+	}
+	
+	// 将距离转换为风险评分
+	// 距离越近，风险越高
+	var riskScore float64
+	if minDistanceToLiquidation <= 5 {
+		riskScore = 100 // 极高风险
+	} else if minDistanceToLiquidation <= 10 {
+		riskScore = 80
+	} else if minDistanceToLiquidation <= 20 {
+		riskScore = 60
+	} else if minDistanceToLiquidation <= 30 {
+		riskScore = 40
+	} else if minDistanceToLiquidation <= 50 {
+		riskScore = 20
+	} else {
+		riskScore = 0 // 低风险
+	}
+	
+	return riskScore
+}
+
+// calculateVolatilityRisk 计算波动率风险评分（0-100）
+func calculateVolatilityRisk(positions []PositionInfo, marketDataMap map[string]*market.Data) float64 {
+	if len(positions) == 0 {
+		return 0.0
+	}
+	
+	totalValue := 0.0
+	weightedVolatility := 0.0
+	
+	for _, pos := range positions {
+		positionValue := math.Abs(pos.Quantity) * pos.MarkPrice
+		totalValue += positionValue
+		
+		// 获取市场数据计算波动率
+		if marketData, exists := marketDataMap[pos.Symbol]; exists {
+			// 使用价格变化作为波动率代理
+			volatility := math.Abs(marketData.PriceChange1h) + math.Abs(marketData.PriceChange4h)
+			weightedVolatility += volatility * positionValue
+		}
+	}
+	
+	if totalValue == 0 {
+		return 0.0
+	}
+	
+	avgVolatility := weightedVolatility / totalValue
+	
+	// 将波动率转换为风险评分
+	// 假设10%的4小时波动率为高风险
+	riskScore := (avgVolatility / 10.0) * 100
+	if riskScore > 100 {
+		riskScore = 100
+	}
+	
+	return riskScore
+}
+
+// CalculateAccountRiskMetrics 计算账户风险相关字段
+func CalculateAccountRiskMetrics(account *AccountInfo, totalEquity float64, positions []PositionInfo) {
+	// 计算风险容量（基于2%风险规则）
+	account.RiskCapacityUSD = totalEquity * 0.02
+	
+	// 单笔最大风险（账户净值的1%）
+	account.MaxRiskPerTrade = totalEquity * 0.01
+	
+	// 日风险预算（账户净值的5%）
+	account.DailyRiskBudget = totalEquity * 0.05
+	
+	// 计算已使用的风险预算（基于当前持仓的潜在损失）
+	usedRisk := 0.0
+	for _, pos := range positions {
+		// 估算潜在损失（到止损位的距离）
+		if pos.UnrealizedPnL < 0 {
+			usedRisk += math.Abs(pos.UnrealizedPnL)
+		}
+	}
+	account.UsedRiskBudget = usedRisk
+}
+
+// getRiskLevel 根据风险评分返回风险等级描述
+func getRiskLevel(score float64) string {
+	if score >= 80 {
+		return "🔴极高风险"
+	} else if score >= 60 {
+		return "🟠高风险"
+	} else if score >= 40 {
+		return "🟡中等风险"
+	} else if score >= 20 {
+		return "🟢低风险"
+	} else {
+		return "✅安全"
+	}
+}
+
+
+// 🔧 新增：智能风险管理结构
+type SmartRiskManager struct {
+	AccountEquity     float64
+	TotalPnLPct       float64
+	MarginUsedPct     float64
+	RecentPerformance float64 // 最近表现评分 (0-100)
+}
+
+// 🔧 新增：计算智能风险管理参数
+func CalculateSmartRiskParams(ctx *Context) *SmartRiskManager {
+	srm := &SmartRiskManager{
+		AccountEquity: ctx.Account.TotalEquity,
+		TotalPnLPct:   ctx.Account.TotalPnLPct,
+		MarginUsedPct: ctx.Account.MarginUsedPct,
+	}
+	
+	// 计算最近表现评分
+	if ctx.DecisionLogger != nil {
+		db := ctx.DecisionLogger.GetDB()
+		if db != nil {
+			records, err := db.Decision().GetLatest(20) // 最近20个周期
+			if err == nil && len(records) > 0 {
+				srm.RecentPerformance = calculateRecentPerformanceScore(records)
+			}
+		}
+	}
+	
+	return srm
+}
+
+// 🔧 新增：计算最近表现评分
+func calculateRecentPerformanceScore(records []*models.DecisionRecord) float64 {
+	if len(records) == 0 {
+		return 50.0 // 默认中等评分
+	}
+	
+	var totalReturn float64
+	var winCount, lossCount int
+	
+	for _, record := range records {
+		if record.TotalUnrealizedProfit != 0 {
+			// 计算收益率百分比
+			returnPct := record.TotalUnrealizedProfit / record.TotalBalance * 100
+			totalReturn += returnPct
+			if returnPct > 0 {
+				winCount++
+			} else {
+				lossCount++
+			}
+		}
+	}
+	
+	// 综合评分：收益率 + 胜率
+	avgReturn := totalReturn / float64(len(records))
+	winRate := float64(winCount) / float64(winCount+lossCount) * 100
+	
+	// 评分公式：基础50分 + 收益率贡献 + 胜率贡献
+	score := 50.0 + avgReturn*2 + (winRate-50)*0.5
+	
+	// 限制在0-100范围内
+	if score < 0 {
+		score = 0
+	} else if score > 100 {
+		score = 100
+	}
+	
+	return score
+}
+
+// 🔧 新增：智能仓位大小计算
+func CalculateSmartPositionSize(baseSize float64, srm *SmartRiskManager, symbol string, confidence int) float64 {
+	adjustedSize := baseSize
+	
+	// 1. 根据账户表现调整 - 更温和的系数，避免过度限制
+	if srm.TotalPnLPct < -50 { // 亏损超过50%才大幅减少
+		adjustedSize *= 0.8 // 减少20%仓位
+	} else if srm.TotalPnLPct < -30 { // 亏损超过30%
+		adjustedSize *= 0.9 // 减少10%仓位
+	} else if srm.TotalPnLPct > 20 { // 盈利超过20%
+		adjustedSize *= 1.2 // 增加20%仓位
+	}
+	
+	// 2. 根据保证金使用率调整 - 只在极高使用率时才大幅减少
+	if srm.MarginUsedPct > 85 {
+		adjustedSize *= 0.6 // 极高保证金使用率时减少
+	} else if srm.MarginUsedPct > 70 {
+		adjustedSize *= 0.8 // 高保证金使用率时适度减少
+	}
+	
+	// 3. 根据最近表现调整 - 大幅减少惩罚
+	if srm.RecentPerformance < 10 {
+		adjustedSize *= 0.85 // 表现极差时轻微减少仓位
+	} else if srm.RecentPerformance > 80 {
+		adjustedSize *= 1.15 // 表现很好时增加仓位
+	}
+	// 移除20-80之间的惩罚，给AI更多空间
+	
+	// 4. 根据信心度调整 - 大幅提高最低信心度
+	confidenceMultiplier := float64(confidence) / 100.0
+	if confidenceMultiplier < 0.85 {
+		confidenceMultiplier = 0.85 // 最低85%，减少惩罚
+	}
+	adjustedSize *= confidenceMultiplier
+	
+	// 5. 币种特殊调整 - 移除山寨币惩罚
+	// 不再对山寨币额外惩罚，让AI自主决策
+	
+	return adjustedSize
+}
+
+// 🔧 新增：动态止损计算
+func CalculateDynamicStopLoss(entryPrice float64, side string, atr float64, volatility float64, confidence int) float64 {
+	// 基础止损距离（使用ATR）
+	baseStopDistance := atr * 2.0
+	
+	// 根据波动率调整
+	if volatility > 0.05 { // 高波动率
+		baseStopDistance *= 1.5
+	} else if volatility < 0.02 { // 低波动率
+		baseStopDistance *= 0.8
+	}
+	
+	// 根据信心度调整
+	confidenceAdjustment := 1.0 + (float64(confidence)-70)/100.0 // 信心度70为基准
+	if confidenceAdjustment < 0.7 {
+		confidenceAdjustment = 0.7
+	} else if confidenceAdjustment > 1.3 {
+		confidenceAdjustment = 1.3
+	}
+	baseStopDistance *= confidenceAdjustment
+	
+	// 计算止损价格
+	var stopLoss float64
+	if side == "long" {
+		stopLoss = entryPrice - baseStopDistance
+	} else {
+		stopLoss = entryPrice + baseStopDistance
+	}
+	
+	return stopLoss
+}
+
+// 🔧 新增：动态止盈计算
+func CalculateDynamicTakeProfit(entryPrice float64, stopLoss float64, side string, riskRewardRatio float64) float64 {
+	var riskDistance float64
+	if side == "long" {
+		riskDistance = entryPrice - stopLoss
+	} else {
+		riskDistance = stopLoss - entryPrice
+	}
+	
+	rewardDistance := riskDistance * riskRewardRatio
+	
+	var takeProfit float64
+	if side == "long" {
+		takeProfit = entryPrice + rewardDistance
+	} else {
+		takeProfit = entryPrice - rewardDistance
+	}
+	
+	return takeProfit
+}
+
+// SmartMarketAnalyzer 智能市场分析器
+type SmartMarketAnalyzer struct {
+	ctx *Context
+}
+
+// NewSmartMarketAnalyzer 创建智能市场分析器
+func NewSmartMarketAnalyzer(ctx *Context) *SmartMarketAnalyzer {
+	return &SmartMarketAnalyzer{ctx: ctx}
+}
+
+// AnalyzeMarketCondition 分析市场状况
+func (sma *SmartMarketAnalyzer) AnalyzeMarketCondition() MarketCondition {
+	btcData, hasBTC := sma.ctx.MarketDataMap["BTCUSDT"]
+	if !hasBTC {
+		return MarketCondition{
+			Trend:      "unknown",
+			Volatility: "medium",
+			Sentiment:  "neutral",
+			Risk:       "medium",
+		}
+	}
+
+	// 分析趋势
+	trend := sma.analyzeTrend(btcData)
+	
+	// 分析波动率
+	volatility := sma.analyzeVolatility(btcData)
+	
+	// 分析市场情绪
+	sentiment := sma.analyzeSentiment(btcData)
+	
+	// 评估风险等级
+	risk := sma.assessRisk(btcData)
+
+	return MarketCondition{
+		Trend:      trend,
+		Volatility: volatility,
+		Sentiment:  sentiment,
+		Risk:       risk,
+	}
+}
+
+// analyzeTrend 分析趋势
+func (sma *SmartMarketAnalyzer) analyzeTrend(data *market.Data) string {
+	// 基于EMA和价格变化分析趋势
+	if data.PriceChange4h > 2.0 && data.PriceChange1h > 0.5 {
+		return "strong_bullish"
+	} else if data.PriceChange4h > 0.5 && data.PriceChange1h > 0 {
+		return "bullish"
+	} else if data.PriceChange4h < -2.0 && data.PriceChange1h < -0.5 {
+		return "strong_bearish"
+	} else if data.PriceChange4h < -0.5 && data.PriceChange1h < 0 {
+		return "bearish"
+	} else {
+		return "sideways"
+	}
+}
+
+// analyzeVolatility 分析波动率
+func (sma *SmartMarketAnalyzer) analyzeVolatility(data *market.Data) string {
+	// 基于价格变化幅度分析波动率
+	volatility := math.Abs(data.PriceChange1h) + math.Abs(data.PriceChange4h)
+	
+	if volatility > 5.0 {
+		return "high"
+	} else if volatility > 2.0 {
+		return "medium"
+	} else {
+		return "low"
+	}
+}
+
+// analyzeSentiment 分析市场情绪
+func (sma *SmartMarketAnalyzer) analyzeSentiment(data *market.Data) string {
+	// 基于RSI和MACD分析情绪
+	if data.CurrentRSI7 > 70 && data.CurrentMACD > 0 {
+		return "greedy"
+	} else if data.CurrentRSI7 < 30 && data.CurrentMACD < 0 {
+		return "fearful"
+	} else if data.CurrentRSI7 > 60 {
+		return "optimistic"
+	} else if data.CurrentRSI7 < 40 {
+		return "pessimistic"
+	} else {
+		return "neutral"
+	}
+}
+
+// assessRisk 评估风险等级
+func (sma *SmartMarketAnalyzer) assessRisk(data *market.Data) string {
+	riskScore := 0
+	
+	// 波动率风险
+	if math.Abs(data.PriceChange1h) > 3.0 {
+		riskScore += 2
+	} else if math.Abs(data.PriceChange1h) > 1.5 {
+		riskScore += 1
+	}
+	
+	// RSI极端值风险
+	if data.CurrentRSI7 > 80 || data.CurrentRSI7 < 20 {
+		riskScore += 2
+	} else if data.CurrentRSI7 > 70 || data.CurrentRSI7 < 30 {
+		riskScore += 1
+	}
+	
+	// 账户保证金风险
+	if sma.ctx.Account.MarginUsedPct > 70 {
+		riskScore += 3
+	} else if sma.ctx.Account.MarginUsedPct > 50 {
+		riskScore += 2
+	} else if sma.ctx.Account.MarginUsedPct > 30 {
+		riskScore += 1
+	}
+	
+	if riskScore >= 5 {
+		return "very_high"
+	} else if riskScore >= 3 {
+		return "high"
+	} else if riskScore >= 2 {
+		return "medium"
+	} else {
+		return "low"
+	}
+}
+
+// MarketCondition 市场状况
+type MarketCondition struct {
+	Trend      string `json:"trend"`      // strong_bullish, bullish, sideways, bearish, strong_bearish
+	Volatility string `json:"volatility"` // low, medium, high
+	Sentiment  string `json:"sentiment"`  // greedy, optimistic, neutral, pessimistic, fearful
+	Risk       string `json:"risk"`       // low, medium, high, very_high
+}
+
+// DecisionQualityAnalyzer 决策质量分析器
+type DecisionQualityAnalyzer struct {
+	ctx             *Context
+	marketCondition MarketCondition
+}
+
+// NewDecisionQualityAnalyzer 创建决策质量分析器
+func NewDecisionQualityAnalyzer(ctx *Context, marketCondition MarketCondition) *DecisionQualityAnalyzer {
+	return &DecisionQualityAnalyzer{
+		ctx:             ctx,
+		marketCondition: marketCondition,
+	}
+}
+
+// EvaluateDecisionQuality 评估决策质量
+func (dqa *DecisionQualityAnalyzer) EvaluateDecisionQuality(decision *Decision) DecisionQuality {
+	score := 100.0
+	issues := []string{}
+	
+	// 检查技术信号质量
+	techScore, techIssues := dqa.evaluateTechnicalSignals(decision)
+	score *= techScore
+	issues = append(issues, techIssues...)
+	
+	// 检查风险管理质量
+	riskScore, riskIssues := dqa.evaluateRiskManagement(decision)
+	score *= riskScore
+	issues = append(issues, riskIssues...)
+	
+	// 检查市场环境适应性
+	envScore, envIssues := dqa.evaluateMarketEnvironment(decision)
+	score *= envScore
+	issues = append(issues, envIssues...)
+	
+	// 检查时机选择
+	timingScore, timingIssues := dqa.evaluateTiming(decision)
+	score *= timingScore
+	issues = append(issues, timingIssues...)
+	
+	// 确定质量等级
+	var grade string
+	if score >= 80 {
+		grade = "excellent"
+	} else if score >= 60 {
+		grade = "good"
+	} else if score >= 40 {
+		grade = "fair"
+	} else {
+		grade = "poor"
+	}
+	
+	return DecisionQuality{
+		Score:  score,
+		Grade:  grade,
+		Issues: issues,
+	}
+}
+
+// evaluateTechnicalSignals 评估技术信号质量
+func (dqa *DecisionQualityAnalyzer) evaluateTechnicalSignals(decision *Decision) (float64, []string) {
+	score := 1.0
+	issues := []string{}
+	
+	data, exists := dqa.ctx.MarketDataMap[decision.Symbol]
+	if !exists {
+		return 0.5, []string{"缺少市场数据"}
+	}
+	
+	// 检查RSI信号
+	if decision.Action == "open_long" && data.CurrentRSI7 > 70 {
+		score *= 0.7
+		issues = append(issues, "RSI超买状态下做多风险较高")
+	}
+	if decision.Action == "open_short" && data.CurrentRSI7 < 30 {
+		score *= 0.7
+		issues = append(issues, "RSI超卖状态下做空风险较高")
+	}
+	
+	// 检查MACD信号
+	if decision.Action == "open_long" && data.CurrentMACD < 0 {
+		score *= 0.8
+		issues = append(issues, "MACD负值时做多需谨慎")
+	}
+	if decision.Action == "open_short" && data.CurrentMACD > 0 {
+		score *= 0.8
+		issues = append(issues, "MACD正值时做空需谨慎")
+	}
+	
+	return score, issues
+}
+
+// evaluateRiskManagement 评估风险管理质量
+func (dqa *DecisionQualityAnalyzer) evaluateRiskManagement(decision *Decision) (float64, []string) {
+	score := 1.0
+	issues := []string{}
+	
+	if decision.Action == "open_long" || decision.Action == "open_short" {
+		// 检查止损设置
+		if decision.StopLoss == 0 {
+			score *= 0.3
+			issues = append(issues, "未设置止损，风险极高")
+		}
+		
+		// 检查止盈设置
+		if decision.TakeProfit == 0 {
+			score *= 0.7
+			issues = append(issues, "未设置止盈目标")
+		}
+		
+		// 检查风险回报比
+		if decision.StopLoss > 0 && decision.TakeProfit > 0 {
+			var riskRewardRatio float64
+			if decision.Action == "open_long" {
+				risk := math.Abs(decision.StopLoss - dqa.ctx.MarketDataMap[decision.Symbol].CurrentPrice)
+				reward := math.Abs(decision.TakeProfit - dqa.ctx.MarketDataMap[decision.Symbol].CurrentPrice)
+				if risk > 0 {
+					riskRewardRatio = reward / risk
+				}
+			} else {
+				risk := math.Abs(dqa.ctx.MarketDataMap[decision.Symbol].CurrentPrice - decision.StopLoss)
+				reward := math.Abs(dqa.ctx.MarketDataMap[decision.Symbol].CurrentPrice - decision.TakeProfit)
+				if risk > 0 {
+					riskRewardRatio = reward / risk
+				}
+			}
+			
+			if riskRewardRatio < 1.5 {
+				score *= 0.5
+				issues = append(issues, fmt.Sprintf("风险回报比%.2f过低", riskRewardRatio))
+			} else if riskRewardRatio < 2.0 {
+				score *= 0.8
+				issues = append(issues, fmt.Sprintf("风险回报比%.2f偏低", riskRewardRatio))
+			}
+		}
+		
+		// 检查仓位大小
+		maxPositionSize := dqa.ctx.Account.TotalEquity * 3.0 // 最大3倍杠杆等效
+		if decision.PositionSizeUSD > maxPositionSize {
+			score *= 0.6
+			issues = append(issues, "仓位过大，超出风险承受能力")
+		}
+	}
+	
+	return score, issues
+}
+
+// evaluateMarketEnvironment 评估市场环境适应性
+func (dqa *DecisionQualityAnalyzer) evaluateMarketEnvironment(decision *Decision) (float64, []string) {
+	score := 1.0
+	issues := []string{}
+	
+	// 高风险环境下的决策评估
+	if dqa.marketCondition.Risk == "very_high" || dqa.marketCondition.Risk == "high" {
+		if decision.Action == "open_long" || decision.Action == "open_short" {
+			score *= 0.6
+			issues = append(issues, "高风险环境下开新仓需要更强的信号确认")
+		}
+	}
+	
+	// 高波动环境下的决策评估
+	if dqa.marketCondition.Volatility == "high" {
+		if decision.Leverage > 5 {
+			score *= 0.7
+			issues = append(issues, "高波动环境下使用高杠杆风险较大")
+		}
+	}
+	
+	// 极端情绪下的决策评估
+	if dqa.marketCondition.Sentiment == "greedy" && decision.Action == "open_long" {
+		score *= 0.8
+		issues = append(issues, "市场贪婪时做多需要谨慎")
+	}
+	if dqa.marketCondition.Sentiment == "fearful" && decision.Action == "open_short" {
+		score *= 0.8
+		issues = append(issues, "市场恐慌时做空需要谨慎")
+	}
+	
+	return score, issues
+}
+
+// evaluateTiming 评估时机选择
+func (dqa *DecisionQualityAnalyzer) evaluateTiming(decision *Decision) (float64, []string) {
+	score := 1.0
+	issues := []string{}
+	
+	// 检查账户状态
+	if dqa.ctx.Account.MarginUsedPct > 70 && (decision.Action == "open_long" || decision.Action == "open_short") {
+		score *= 0.5
+		issues = append(issues, "保证金使用率过高，不宜开新仓")
+	}
+	
+	// 检查持仓数量
+	if len(dqa.ctx.Positions) >= 3 && (decision.Action == "open_long" || decision.Action == "open_short") {
+		score *= 0.8
+		issues = append(issues, "持仓过多，增加管理难度")
+	}
+	
+	// 检查信心度
+	if decision.Confidence < 75 && (decision.Action == "open_long" || decision.Action == "open_short") {
+		score *= 0.7
+		issues = append(issues, "信心度不足，建议等待更好机会")
+	}
+	
+	return score, issues
+}
+
+// DecisionQuality 决策质量
+type DecisionQuality struct {
+	Score  float64  `json:"score"`  // 0-100分
+	Grade  string   `json:"grade"`  // excellent, good, fair, poor
+	Issues []string `json:"issues"` // 问题列表
+}
+
+// ... existing code ...

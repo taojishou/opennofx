@@ -1,14 +1,8 @@
 import { useState, useEffect } from 'react';
-
-interface PromptSection {
-  id: number;
-  section_name: string;
-  title: string;
-  content: string;
-  enabled: boolean;
-  display_order: number;
-  updated_at: string;
-}
+import { Card, Button, Input, TextArea, Switch, Modal } from './ui';
+import { useToast } from './ui/Toast';
+import { PromptSection } from '../types/config';
+import { theme } from '../styles/theme';
 
 interface PromptConfigProps {
   traderId: string;
@@ -17,17 +11,46 @@ interface PromptConfigProps {
 export default function PromptConfig({ traderId }: PromptConfigProps) {
   const [sections, setSections] = useState<PromptSection[]>([]);
   const [loading, setLoading] = useState(true);
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [editMode, setEditMode] = useState(false);
   const [editContent, setEditContent] = useState('');
+  const [editTitle, setEditTitle] = useState('');
   const [saving, setSaving] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [preview, setPreview] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
-  const [newSection, setNewSection] = useState({ section_name: '', title: '', content: '', enabled: true });
+  const [activeTab, setActiveTab] = useState<'system' | 'user'>('system');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [newSection, setNewSection] = useState({ 
+    section_name: '', 
+    title: '', 
+    content: '', 
+    prompt_type: 'system' as 'system' | 'user',
+    enabled: true 
+  });
+  const toast = useToast();
+
+  // 筛选和搜索
+  const filteredSections = sections
+    .filter(s => s.prompt_type === activeTab)
+    .filter(s => searchTerm === '' || 
+      s.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      s.section_name.toLowerCase().includes(searchTerm.toLowerCase())
+    )
+    .sort((a, b) => a.display_order - b.display_order);
+
+  const selectedSection = sections.find(s => s.id === selectedId);
 
   useEffect(() => {
     loadPrompts();
   }, [traderId]);
+
+  useEffect(() => {
+    // 切换tab时选择第一个
+    if (filteredSections.length > 0 && !selectedId) {
+      setSelectedId(filteredSections[0].id);
+    }
+  }, [activeTab, filteredSections.length]);
 
   const loadPrompts = async () => {
     try {
@@ -36,6 +59,9 @@ export default function PromptConfig({ traderId }: PromptConfigProps) {
       const data = await response.json();
       if (data.success) {
         setSections(data.data || []);
+        if (data.data?.length > 0) {
+          setSelectedId(data.data[0].id);
+        }
       }
     } catch (error) {
       console.error('加载Prompt配置失败:', error);
@@ -56,56 +82,64 @@ export default function PromptConfig({ traderId }: PromptConfigProps) {
         setSections(prev =>
           prev.map(s => (s.section_name === sectionName ? { ...s, enabled: !enabled } : s))
         );
+        toast.success(enabled ? '已禁用' : '已启用');
       }
     } catch (error) {
       console.error('切换状态失败:', error);
-      alert('切换状态失败，请重试');
+      toast.error('切换状态失败');
     }
   };
 
-  const handleEdit = (section: PromptSection) => {
-    setEditingId(section.id);
-    setEditContent(section.content);
+  const handleEdit = () => {
+    if (selectedSection) {
+      setEditMode(true);
+      setEditContent(selectedSection.content);
+      setEditTitle(selectedSection.title);
+    }
   };
 
-  const handleSave = async (section: PromptSection) => {
+  const handleSave = async () => {
+    if (!selectedSection) return;
+
     try {
       setSaving(true);
       const response = await fetch(`/api/prompts/update?trader_id=${traderId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          section_name: section.section_name,
-          title: section.title,
+          section_name: selectedSection.section_name,
+          title: editTitle,
           content: editContent,
-          enabled: section.enabled,
-          display_order: section.display_order,
+          prompt_type: selectedSection.prompt_type,
+          enabled: selectedSection.enabled,
+          display_order: selectedSection.display_order,
         }),
       });
       const data = await response.json();
       if (data.success) {
         setSections(prev =>
-          prev.map(s => (s.id === section.id ? { ...s, content: editContent } : s))
+          prev.map(s => (s.id === selectedSection.id ? { ...s, content: editContent, title: editTitle } : s))
         );
-        setEditingId(null);
-        alert('保存成功！');
+        setEditMode(false);
+        toast.success('保存成功！');
       }
     } catch (error) {
       console.error('保存失败:', error);
-      alert('保存失败，请重试');
+      toast.error('保存失败');
     } finally {
       setSaving(false);
     }
   };
 
   const handleCancel = () => {
-    setEditingId(null);
+    setEditMode(false);
     setEditContent('');
+    setEditTitle('');
   };
 
   const handleAdd = async () => {
     if (!newSection.section_name || !newSection.title || !newSection.content) {
-      alert('请填写完整信息');
+      toast.error('请填写完整信息');
       return;
     }
 
@@ -120,38 +154,42 @@ export default function PromptConfig({ traderId }: PromptConfigProps) {
       if (data.success) {
         await loadPrompts();
         setShowAddForm(false);
-        setNewSection({ section_name: '', title: '', content: '', enabled: true });
-        alert('添加成功！');
+        setNewSection({ 
+          section_name: '', 
+          title: '', 
+          content: '', 
+          prompt_type: activeTab,
+          enabled: true 
+        });
+        toast.success('添加成功！');
       } else {
-        alert('添加失败: ' + (data.error || '未知错误'));
+        toast.error('添加失败: ' + (data.error || '未知错误'));
       }
     } catch (error) {
       console.error('添加失败:', error);
-      alert('添加失败，请重试');
+      toast.error('添加失败');
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDelete = async (sectionName: string) => {
-    if (!confirm(`确定要删除 "${sectionName}" 吗？此操作不可撤销！`)) {
-      return;
-    }
+  const handleDelete = async () => {
+    if (!selectedSection) return;
+    if (!confirm(`确定要删除 "${selectedSection.title}" 吗？`)) return;
 
     try {
-      const response = await fetch(`/api/prompts/delete?trader_id=${traderId}&section_name=${sectionName}`, {
+      const response = await fetch(`/api/prompts/delete?trader_id=${traderId}&section_name=${selectedSection.section_name}`, {
         method: 'DELETE',
       });
       const data = await response.json();
       if (data.success) {
         await loadPrompts();
-        alert('删除成功！');
-      } else {
-        alert('删除失败: ' + (data.error || '未知错误'));
+        setSelectedId(null);
+        toast.success('删除成功！');
       }
     } catch (error) {
       console.error('删除失败:', error);
-      alert('删除失败，请重试');
+      toast.error('删除失败');
     }
   };
 
@@ -165,400 +203,372 @@ export default function PromptConfig({ traderId }: PromptConfigProps) {
       }
     } catch (error) {
       console.error('预览失败:', error);
-      alert('预览失败，请重试');
+      toast.error('预览失败');
     }
   };
 
   if (loading) {
     return (
-      <div className="rounded-2xl p-8" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
-        <div style={{ color: '#848E9C' }}>⏳ 加载中...</div>
-      </div>
+      <Card>
+        <div style={{ color: theme.colors.text.secondary }}>⏳ 加载中...</div>
+      </Card>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* 标题栏 */}
-      <div className="relative rounded-2xl p-6 overflow-hidden" style={{
-        background: 'linear-gradient(135deg, rgba(139, 92, 246, 0.15) 0%, rgba(99, 102, 241, 0.1) 50%, rgba(30, 35, 41, 0.8) 100%)',
-        border: '1px solid rgba(139, 92, 246, 0.3)',
-        boxShadow: '0 8px 32px rgba(139, 92, 246, 0.2)'
-      }}>
-        <div className="absolute top-0 right-0 w-96 h-96 rounded-full opacity-10" style={{
-          background: 'radial-gradient(circle, #8B5CF6 0%, transparent 70%)',
-          filter: 'blur(60px)'
-        }} />
-        <div className="relative flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-3xl" style={{
-              background: 'linear-gradient(135deg, #8B5CF6 0%, #6366F1 100%)',
-              boxShadow: '0 8px 24px rgba(139, 92, 246, 0.5)',
-              border: '2px solid rgba(255, 255, 255, 0.1)'
-            }}>
-              ⚙️
-            </div>
+    <div className="space-y-4">
+      {/* 顶部工具栏 */}
+      <Card variant="purple">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="text-2xl">⚙️</div>
             <div>
-              <h2 className="text-3xl font-bold mb-1" style={{
-                color: '#EAECEF',
-                textShadow: '0 2px 8px rgba(139, 92, 246, 0.3)'
-              }}>
-                AI Prompt 配置
+              <h2 className="text-xl font-bold" style={{ color: theme.colors.brand.primary }}>
+                Prompt配置管理
               </h2>
-              <p className="text-base" style={{ color: '#A78BFA' }}>
-                动态调整AI交易策略，实时生效
+              <p className="text-sm" style={{ color: theme.colors.text.secondary }}>
+                管理AI决策的系统提示和用户数据模板
               </p>
             </div>
           </div>
-          <div className="flex gap-3">
-            <button
-              onClick={() => setShowAddForm(!showAddForm)}
-              className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
-              style={{
-                background: 'linear-gradient(135deg, #10B981 0%, #0ECB81 100%)',
-                color: '#FFFFFF',
-                boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)'
-              }}
-            >
-              ➕ 新增Prompt
-            </button>
-            <button
-              onClick={handlePreview}
-              className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
-              style={{
-                background: 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)',
-                color: '#1E2329',
-                boxShadow: '0 4px 16px rgba(240, 185, 11, 0.3)'
-              }}
-            >
-              👁️ 预览完整Prompt
-            </button>
+          <div className="flex gap-2">
+            <Button variant="success" size="sm" onClick={() => setShowAddForm(true)}>
+              ➕ 新增
+            </Button>
+            <Button variant="primary" size="sm" onClick={handlePreview}>
+              👁️ 预览
+            </Button>
           </div>
         </div>
-      </div>
+      </Card>
 
-      {/* 新增Prompt表单 */}
-      {showAddForm && (
-        <div className="rounded-2xl p-6" style={{
-          background: 'rgba(30, 35, 41, 0.8)',
-          border: '1px solid rgba(139, 92, 246, 0.3)',
-          boxShadow: '0 4px 16px rgba(139, 92, 246, 0.1)'
-        }}>
-          <h3 className="text-xl font-bold mb-4" style={{ color: '#EAECEF' }}>
-            ➕ 新增Prompt Section
-          </h3>
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
-                Section Name (英文标识，唯一)
-              </label>
-              <input
-                type="text"
-                value={newSection.section_name}
-                onChange={(e) => setNewSection({ ...newSection, section_name: e.target.value })}
-                placeholder="例如: my_custom_rule"
-                className="w-full rounded-xl p-3"
-                style={{
-                  background: 'rgba(0, 0, 0, 0.3)',
-                  border: '1px solid rgba(139, 92, 246, 0.3)',
-                  color: '#EAECEF',
-                  outline: 'none'
-                }}
-              />
-            </div>
-            <div>
-              <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
-                标题 (可包含emoji)
-              </label>
-              <input
-                type="text"
-                value={newSection.title}
-                onChange={(e) => setNewSection({ ...newSection, title: e.target.value })}
-                placeholder="例如: 🎯 我的自定义规则"
-                className="w-full rounded-xl p-3"
-                style={{
-                  background: 'rgba(0, 0, 0, 0.3)',
-                  border: '1px solid rgba(139, 92, 246, 0.3)',
-                  color: '#EAECEF',
-                  outline: 'none'
-                }}
-              />
-            </div>
-            <div>
-              <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
-                内容 (Markdown格式)
-              </label>
-              <textarea
-                value={newSection.content}
-                onChange={(e) => setNewSection({ ...newSection, content: e.target.value })}
-                rows={10}
-                placeholder="输入Prompt内容..."
-                className="w-full rounded-xl p-4 font-mono text-sm leading-relaxed resize-y"
-                style={{
-                  background: 'rgba(0, 0, 0, 0.3)',
-                  border: '1px solid rgba(139, 92, 246, 0.3)',
-                  color: '#E0E7FF',
-                  outline: 'none'
-                }}
-              />
-            </div>
-            <div className="flex gap-3">
+      {/* 主内容区 - 左右分栏 */}
+      <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: '1rem', minHeight: '600px' }}>
+        {/* 左侧列表 */}
+        <div className="space-y-3">
+          {/* 标签切换 */}
+          <Card>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
               <button
-                onClick={handleAdd}
-                disabled={saving}
-                className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105 disabled:opacity-50"
+                onClick={() => setActiveTab('system')}
                 style={{
-                  background: 'linear-gradient(135deg, #10B981 0%, #0ECB81 100%)',
-                  color: '#FFFFFF',
-                  boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)'
+                  flex: 1,
+                  padding: '0.5rem 1rem',
+                  borderRadius: theme.radius.md,
+                  border: 'none',
+                  background: activeTab === 'system' ? theme.colors.purple.gradient : theme.colors.background.tertiary,
+                  color: theme.colors.text.primary,
+                  fontWeight: activeTab === 'system' ? 'bold' : 'normal',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
                 }}
               >
-                {saving ? '⏳ 添加中...' : '✅ 确认添加'}
+                🧠 System ({sections.filter(s => s.prompt_type === 'system').length})
               </button>
               <button
-                onClick={() => {
-                  setShowAddForm(false);
-                  setNewSection({ section_name: '', title: '', content: '', enabled: true });
-                }}
-                disabled={saving}
-                className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105 disabled:opacity-50"
+                onClick={() => setActiveTab('user')}
                 style={{
-                  background: 'rgba(248, 113, 113, 0.2)',
-                  color: '#FCA5A5',
-                  border: '1px solid rgba(248, 113, 113, 0.3)'
+                  flex: 1,
+                  padding: '0.5rem 1rem',
+                  borderRadius: theme.radius.md,
+                  border: 'none',
+                  background: activeTab === 'user' ? theme.colors.brand.gradient : theme.colors.background.tertiary,
+                  color: theme.colors.text.primary,
+                  fontWeight: activeTab === 'user' ? 'bold' : 'normal',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
                 }}
               >
-                ❌ 取消
+                📊 User ({sections.filter(s => s.prompt_type === 'user').length})
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </Card>
 
-      {/* Prompt部分列表 */}
-      <div className="space-y-4">
-        {sections.map((section) => {
-          const isEditing = editingId === section.id;
-          
-          return (
-            <div
-              key={section.id}
-              className="rounded-2xl overflow-hidden transition-all hover:scale-[1.01]"
-              style={{
-                background: 'rgba(30, 35, 41, 0.6)',
-                border: section.enabled ? '1px solid rgba(139, 92, 246, 0.3)' : '1px solid rgba(71, 85, 105, 0.3)',
-                boxShadow: section.enabled ? '0 4px 16px rgba(139, 92, 246, 0.1)' : 'none'
-              }}
-            >
-              {/* Header */}
-              <div className="p-6 border-b" style={{ borderColor: 'rgba(71, 85, 105, 0.3)' }}>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className="text-2xl">{section.title.split(' ')[0]}</div>
-                    <div>
-                      <h3 className="text-xl font-bold" style={{ color: '#EAECEF' }}>
-                        {section.title}
-                      </h3>
-                      <div className="text-sm" style={{ color: '#848E9C' }}>
-                        {section.section_name}
+          {/* 搜索框 */}
+          <Card>
+            <Input
+              placeholder="🔍 搜索..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              fullWidth
+            />
+          </Card>
+
+          {/* 列表 */}
+          <Card style={{ maxHeight: '500px', overflow: 'auto' }}>
+            <div className="space-y-2">
+              {filteredSections.length === 0 ? (
+                <div style={{ color: theme.colors.text.tertiary, textAlign: 'center', padding: '2rem' }}>
+                  暂无配置
+                </div>
+              ) : (
+                filteredSections.map((section) => (
+                  <div
+                    key={section.id}
+                    onClick={() => {
+                      setSelectedId(section.id);
+                      setEditMode(false);
+                    }}
+                    style={{
+                      padding: '0.75rem',
+                      borderRadius: theme.radius.md,
+                      background: selectedId === section.id 
+                        ? theme.colors.purple.light 
+                        : 'transparent',
+                      border: selectedId === section.id
+                        ? `1px solid ${theme.colors.purple.border}`
+                        : '1px solid transparent',
+                      cursor: 'pointer',
+                      transition: 'all 0.2s',
+                    }}
+                    onMouseEnter={(e) => {
+                      if (selectedId !== section.id) {
+                        e.currentTarget.style.background = theme.colors.background.tertiary;
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      if (selectedId !== section.id) {
+                        e.currentTarget.style.background = 'transparent';
+                      }
+                    }}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2" style={{ flex: 1, minWidth: 0 }}>
+                        <span>{section.title.split(' ')[0]}</span>
+                        <span
+                          style={{
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            color: theme.colors.text.primary,
+                            fontSize: '0.9rem',
+                            fontWeight: selectedId === section.id ? 'bold' : 'normal',
+                          }}
+                        >
+                          {section.title.split(' ').slice(1).join(' ')}
+                        </span>
                       </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={section.enabled}
-                        onChange={() => handleToggle(section.section_name, section.enabled)}
-                        className="w-5 h-5 rounded cursor-pointer"
+                      <div
                         style={{
-                          accentColor: '#8B5CF6'
+                          width: '8px',
+                          height: '8px',
+                          borderRadius: '50%',
+                          background: section.enabled ? theme.colors.success.main : theme.colors.text.tertiary,
                         }}
                       />
-                      <span className="text-sm font-semibold" style={{ 
-                        color: section.enabled ? '#A78BFA' : '#848E9C' 
-                      }}>
-                        {section.enabled ? '已启用' : '已禁用'}
-                      </span>
-                    </label>
-                    {!isEditing ? (
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => handleEdit(section)}
-                          className="px-4 py-2 rounded-lg font-semibold transition-all hover:scale-105"
-                          style={{
-                            background: 'rgba(139, 92, 246, 0.2)',
-                            color: '#A78BFA',
-                            border: '1px solid rgba(139, 92, 246, 0.3)'
-                          }}
-                        >
-                          ✏️ 编辑
-                        </button>
-                        <button
-                          onClick={() => handleDelete(section.section_name)}
-                          className="px-4 py-2 rounded-lg font-semibold transition-all hover:scale-105"
-                          style={{
-                            background: 'rgba(248, 113, 113, 0.2)',
-                            color: '#FCA5A5',
-                            border: '1px solid rgba(248, 113, 113, 0.3)'
-                          }}
-                        >
-                          🗑️ 删除
-                        </button>
-                      </div>
-                    ) : null}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: theme.colors.text.tertiary, marginTop: '0.25rem' }}>
+                      {section.section_name}
+                    </div>
                   </div>
+                ))
+              )}
+            </div>
+          </Card>
+        </div>
+
+        {/* 右侧详情 */}
+        <Card>
+          {!selectedSection ? (
+            <div style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              justifyContent: 'center', 
+              height: '100%',
+              color: theme.colors.text.tertiary 
+            }}>
+              请从左侧选择一个Prompt
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* 头部 */}
+              <div className="flex items-start justify-between">
+                <div style={{ flex: 1 }}>
+                  {editMode ? (
+                    <Input
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      fullWidth
+                      style={{ fontSize: '1.25rem', fontWeight: 'bold' }}
+                    />
+                  ) : (
+                    <>
+                      <h3 className="text-2xl font-bold mb-2" style={{ color: theme.colors.text.primary }}>
+                        {selectedSection.title}
+                      </h3>
+                      <div className="flex items-center gap-3 text-sm" style={{ color: theme.colors.text.secondary }}>
+                        <span>{selectedSection.section_name}</span>
+                        <span 
+                          className="px-2 py-0.5 rounded text-xs" 
+                          style={{
+                            background: selectedSection.prompt_type === 'system' 
+                              ? theme.colors.purple.light 
+                              : theme.colors.brand.light,
+                            color: theme.colors.text.primary,
+                          }}
+                        >
+                          {selectedSection.prompt_type === 'system' ? 'System' : 'User'}
+                        </span>
+                        <span style={{ fontSize: '0.75rem', color: theme.colors.text.tertiary }}>
+                          更新: {new Date(selectedSection.updated_at).toLocaleString('zh-CN', {
+                            month: 'numeric',
+                            day: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={selectedSection.enabled}
+                    onChange={() => handleToggle(selectedSection.section_name, selectedSection.enabled)}
+                    label={selectedSection.enabled ? '启用' : '禁用'}
+                  />
+                  {!editMode ? (
+                    <>
+                      <Button variant="purple" size="sm" onClick={handleEdit}>
+                        ✏️ 编辑
+                      </Button>
+                      <Button variant="danger" size="sm" onClick={handleDelete}>
+                        🗑️
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button variant="success" size="sm" onClick={handleSave} isLoading={saving}>
+                        ✅ 保存
+                      </Button>
+                      <Button variant="danger" size="sm" onClick={handleCancel} disabled={saving}>
+                        ❌ 取消
+                      </Button>
+                    </>
+                  )}
                 </div>
               </div>
 
-              {/* Content */}
-              <div className="p-6">
-                {isEditing ? (
-                  <div className="space-y-4">
-                    <textarea
-                      value={editContent}
-                      onChange={(e) => setEditContent(e.target.value)}
-                      rows={15}
-                      className="w-full rounded-xl p-4 font-mono text-sm leading-relaxed resize-y"
-                      style={{
-                        background: 'rgba(0, 0, 0, 0.3)',
-                        border: '1px solid rgba(139, 92, 246, 0.3)',
-                        color: '#E0E7FF',
-                        outline: 'none'
-                      }}
-                    />
-                    <div className="flex gap-3">
-                      <button
-                        onClick={() => handleSave(section)}
-                        disabled={saving}
-                        className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105 disabled:opacity-50"
-                        style={{
-                          background: 'linear-gradient(135deg, #10B981 0%, #0ECB81 100%)',
-                          color: '#FFFFFF',
-                          boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)'
-                        }}
-                      >
-                        {saving ? '⏳ 保存中...' : '✅ 保存'}
-                      </button>
-                      <button
-                        onClick={handleCancel}
-                        disabled={saving}
-                        className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105 disabled:opacity-50"
-                        style={{
-                          background: 'rgba(248, 113, 113, 0.2)',
-                          color: '#FCA5A5',
-                          border: '1px solid rgba(248, 113, 113, 0.3)'
-                        }}
-                      >
-                        ❌ 取消
-                      </button>
-                    </div>
-                  </div>
+              {/* 内容区 */}
+              <div style={{ borderTop: `1px solid ${theme.colors.border.primary}`, paddingTop: '1rem' }}>
+                {editMode ? (
+                  <TextArea
+                    value={editContent}
+                    onChange={(e) => setEditContent(e.target.value)}
+                    rows={20}
+                    fullWidth
+                    style={{ fontFamily: 'monospace', fontSize: '0.9rem' }}
+                  />
                 ) : (
                   <pre
-                    className="whitespace-pre-wrap font-mono text-sm leading-relaxed"
+                    className="whitespace-pre-wrap font-mono"
                     style={{
-                      color: section.enabled ? '#CBD5E1' : '#64748B'
+                      color: theme.colors.text.secondary,
+                      fontSize: '0.9rem',
+                      lineHeight: '1.6',
+                      maxHeight: '500px',
+                      overflow: 'auto',
                     }}
                   >
-                    {section.content}
+                    {selectedSection.content}
                   </pre>
                 )}
               </div>
-
-              {/* Footer */}
-              {!isEditing && (
-                <div className="px-6 py-3 border-t" style={{ 
-                  borderColor: 'rgba(71, 85, 105, 0.3)',
-                  background: 'rgba(0, 0, 0, 0.2)'
-                }}>
-                  <div className="text-xs" style={{ color: '#64748B' }}>
-                    最后更新: {new Date(section.updated_at).toLocaleString('zh-CN')}
-                  </div>
-                </div>
-              )}
             </div>
-          );
-        })}
+          )}
+        </Card>
       </div>
 
-      {/* 预览对话框 */}
-      {previewOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: 'rgba(0, 0, 0, 0.8)' }}
-          onClick={() => setPreviewOpen(false)}
-        >
-          <div
-            className="rounded-2xl p-6 max-w-4xl w-full max-h-[80vh] overflow-y-auto"
-            style={{
-              background: '#1E2329',
-              border: '1px solid rgba(139, 92, 246, 0.3)',
-              boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5)'
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-2xl font-bold" style={{ color: '#EAECEF' }}>
-                完整System Prompt预览
-              </h3>
-              <button
-                onClick={() => setPreviewOpen(false)}
-                className="text-2xl hover:scale-110 transition-transform"
-                style={{ color: '#848E9C' }}
-              >
-                ✕
-              </button>
-            </div>
-            <pre
-              className="whitespace-pre-wrap font-mono text-sm leading-relaxed p-4 rounded-xl"
+      {/* 新增对话框 */}
+      <Modal
+        isOpen={showAddForm}
+        onClose={() => setShowAddForm(false)}
+        title="➕ 新增Prompt"
+        maxWidth="2xl"
+      >
+        <div className="space-y-4">
+          <Input
+            label="Section Name"
+            placeholder="例如: my_custom_rule"
+            value={newSection.section_name}
+            onChange={(e) => setNewSection({ ...newSection, section_name: e.target.value })}
+            fullWidth
+          />
+          <Input
+            label="标题"
+            placeholder="例如: 🎯 我的自定义规则"
+            value={newSection.title}
+            onChange={(e) => setNewSection({ ...newSection, title: e.target.value })}
+            fullWidth
+          />
+          <div>
+            <label className="block text-sm font-medium mb-2" style={{ color: theme.colors.text.primary }}>
+              类型
+            </label>
+            <select
+              value={newSection.prompt_type}
+              onChange={(e) => setNewSection({ ...newSection, prompt_type: e.target.value as 'system' | 'user' })}
+              className="w-full px-4 py-2 rounded-lg border"
               style={{
-                background: 'rgba(0, 0, 0, 0.3)',
-                color: '#CBD5E1',
-                border: '1px solid rgba(71, 85, 105, 0.3)'
+                background: theme.colors.background.secondary,
+                borderColor: theme.colors.border.primary,
+                color: theme.colors.text.primary,
               }}
             >
-              {preview}
-            </pre>
-            <div className="mt-4 flex justify-end">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(preview);
-                  alert('已复制到剪贴板！');
-                }}
-                className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
-                style={{
-                  background: 'rgba(139, 92, 246, 0.2)',
-                  color: '#A78BFA',
-                  border: '1px solid rgba(139, 92, 246, 0.3)'
-                }}
-              >
-                📋 复制到剪贴板
-              </button>
-            </div>
+              <option value="system">System (静态规则)</option>
+              <option value="user">User (动态数据)</option>
+            </select>
+          </div>
+          <TextArea
+            label="内容"
+            placeholder="输入Prompt内容..."
+            rows={12}
+            value={newSection.content}
+            onChange={(e) => setNewSection({ ...newSection, content: e.target.value })}
+            fullWidth
+          />
+          <div className="flex gap-3 justify-end">
+            <Button variant="danger" onClick={() => setShowAddForm(false)}>
+              取消
+            </Button>
+            <Button variant="success" onClick={handleAdd} isLoading={saving}>
+              {saving ? '添加中...' : '确认添加'}
+            </Button>
           </div>
         </div>
-      )}
+      </Modal>
 
-      {/* 说明卡片 */}
-      <div className="rounded-2xl p-6" style={{
-        background: 'linear-gradient(135deg, rgba(240, 185, 11, 0.1) 0%, rgba(252, 213, 53, 0.05) 100%)',
-        border: '1px solid rgba(240, 185, 11, 0.2)'
-      }}>
-        <div className="flex items-start gap-4">
-          <div className="text-2xl">💡</div>
-          <div>
-            <h4 className="font-bold mb-2" style={{ color: '#FCD34D' }}>使用提示</h4>
-            <ul className="space-y-2 text-sm" style={{ color: '#CBD5E1' }}>
-              <li>• 修改后立即生效，AI下次决策时会使用新配置</li>
-              <li>• 可以禁用某些部分进行A/B测试</li>
-              <li>• 支持变量: {'{{accountEquity}}'}, {'{{btcEthLeverage}}'}, {'{{altcoinLeverage}}'}</li>
-              <li>• 建议小幅调整并观察效果，避免大幅改动</li>
-              <li>• 点击"预览完整Prompt"可查看AI实际接收的内容</li>
-            </ul>
-          </div>
-        </div>
-      </div>
+      {/* 预览对话框 */}
+      <Modal
+        isOpen={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        title="完整Prompt预览"
+        maxWidth="4xl"
+        footer={
+          <Button
+            variant="purple"
+            onClick={() => {
+              navigator.clipboard.writeText(preview);
+              toast.success('已复制！');
+            }}
+          >
+            📋 复制
+          </Button>
+        }
+      >
+        <pre
+          className="whitespace-pre-wrap font-mono text-sm leading-relaxed p-4 rounded-xl"
+          style={{
+            background: theme.colors.background.primary,
+            color: theme.colors.text.secondary,
+            border: `1px solid ${theme.colors.border.secondary}`,
+            maxHeight: '600px',
+            overflow: 'auto',
+          }}
+        >
+          {preview}
+        </pre>
+      </Modal>
     </div>
   );
 }

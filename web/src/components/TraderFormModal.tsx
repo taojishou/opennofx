@@ -1,27 +1,8 @@
 import { useState, useEffect } from 'react';
-
-interface TraderConfig {
-  id: string;
-  name: string;
-  enabled: boolean;
-  ai_model: string;
-  exchange: string;
-  binance_api_key?: string;
-  binance_secret_key?: string;
-  hyperliquid_private_key?: string;
-  hyperliquid_wallet_addr?: string;
-  hyperliquid_testnet?: boolean;
-  aster_user?: string;
-  aster_signer?: string;
-  aster_private_key?: string;
-  qwen_key?: string;
-  deepseek_key?: string;
-  custom_api_url?: string;
-  custom_api_key?: string;
-  custom_model_name?: string;
-  initial_balance: number;
-  scan_interval_minutes: number;
-}
+import { Modal, Button, Input, Select, Switch } from './ui';
+import { useToast } from './ui/Toast';
+import { TraderConfig, TraderTemplate } from '../types/config';
+import { theme } from '../styles/theme';
 
 interface TraderFormModalProps {
   trader: Partial<TraderConfig>;
@@ -31,54 +12,84 @@ interface TraderFormModalProps {
   onApplyTemplate?: () => void;
 }
 
+const TRADER_TEMPLATES: TraderTemplate[] = [
+  {
+    name: '币安 Qwen Trader',
+    template: {
+      exchange: 'binance',
+      ai_model: 'qwen',
+      initial_balance: 1000,
+      scan_interval_minutes: 3,
+      enabled: true,
+    }
+  },
+  {
+    name: '币安 DeepSeek Trader',
+    template: {
+      exchange: 'binance',
+      ai_model: 'deepseek',
+      initial_balance: 1000,
+      scan_interval_minutes: 3,
+      enabled: true,
+    }
+  },
+  {
+    name: 'Hyperliquid DeepSeek',
+    template: {
+      exchange: 'hyperliquid',
+      ai_model: 'deepseek',
+      initial_balance: 1000,
+      scan_interval_minutes: 3,
+      hyperliquid_testnet: false,
+      enabled: true,
+    }
+  },
+];
+
 export default function TraderFormModal({
   trader,
   isEdit,
   onSave,
   onCancel,
-  onApplyTemplate
+  onApplyTemplate,
 }: TraderFormModalProps) {
-  const [form, setForm] = useState<Partial<TraderConfig>>(trader);
+  const [form, setForm] = useState<Partial<TraderConfig>>({ ...trader, exchange: trader.exchange || 'binance' });
   const [showSecrets, setShowSecrets] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
+  const toast = useToast();
 
   useEffect(() => {
-    // 确保exchange字段有默认值
-    const updatedTrader = {
-      ...trader,
-      exchange: trader.exchange || 'binance'
-    };
-    setForm(updatedTrader);
-    console.log('Trader form loaded:', updatedTrader);
+    setForm({ ...trader, exchange: trader.exchange || 'binance' });
   }, [trader]);
 
-  const handleSubmit = () => {
-    // 验证必填字段
+  const validateForm = (): string | null => {
     if (!form.id || !form.name || !form.ai_model || !form.exchange) {
-      alert('请填写所有必填字段');
-      return;
+      return '请填写所有必填字段';
     }
 
-    // 验证交易所配置
     if (form.exchange === 'binance' && (!form.binance_api_key || !form.binance_secret_key)) {
-      alert('使用币安时必须配置API Key和Secret Key');
-      return;
+      return '使用币安时必须配置API Key和Secret Key';
     }
     if (form.exchange === 'hyperliquid' && !form.hyperliquid_private_key) {
-      alert('使用Hyperliquid时必须配置Private Key');
-      return;
+      return '使用Hyperliquid时必须配置Private Key';
     }
-
-    // 验证AI配置
     if (form.ai_model === 'qwen' && !form.qwen_key) {
-      alert('使用Qwen时必须配置API Key');
-      return;
+      return '使用Qwen时必须配置API Key';
     }
     if (form.ai_model === 'deepseek' && !form.deepseek_key) {
-      alert('使用DeepSeek时必须配置API Key');
+      return '使用DeepSeek时必须配置API Key';
+    }
+
+    return null;
+  };
+
+  const handleSubmit = () => {
+    const error = validateForm();
+    if (error) {
+      toast.error(error);
       return;
     }
 
-    // 处理私钥：自动去掉0x前缀
     const processedForm = { ...form };
     if (processedForm.hyperliquid_private_key?.startsWith('0x') || processedForm.hyperliquid_private_key?.startsWith('0X')) {
       processedForm.hyperliquid_private_key = processedForm.hyperliquid_private_key.slice(2);
@@ -90,398 +101,316 @@ export default function TraderFormModal({
     onSave(processedForm as TraderConfig);
   };
 
+  const applyTemplate = (template: Partial<TraderConfig>) => {
+    setForm({ ...form, ...template });
+    setShowTemplates(false);
+  };
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(0, 0, 0, 0.8)' }}
-      onClick={onCancel}
-    >
-      <div
-        className="rounded-2xl p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto"
-        style={{
-          background: '#1E2329',
-          border: '1px solid rgba(99, 102, 241, 0.3)',
-          boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5)'
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* 标题 */}
-        <div className="flex items-center justify-between mb-6">
-          <h2 className="text-2xl font-bold" style={{ color: '#EAECEF' }}>
-            {isEdit ? '✏️ 编辑Trader' : '➕ 添加新Trader'}
-          </h2>
-          <div className="flex gap-2">
-            {!isEdit && onApplyTemplate && (
-              <button
-                onClick={onApplyTemplate}
-                className="px-4 py-2 rounded-lg font-semibold transition-all hover:scale-105"
-                style={{
-                  background: 'rgba(240, 185, 11, 0.2)',
-                  color: '#FCD34D',
-                  border: '1px solid rgba(240, 185, 11, 0.3)'
-                }}
-              >
-                📋 使用模板
-              </button>
-            )}
-            <button
-              onClick={onCancel}
-              className="text-2xl hover:scale-110 transition-transform"
-              style={{ color: '#848E9C' }}
-            >
-              ✕
-            </button>
+    <>
+      <Modal
+        isOpen={true}
+        onClose={onCancel}
+        title={isEdit ? '✏️ 编辑Trader' : '➕ 添加新Trader'}
+        maxWidth="4xl"
+        footer={
+          <div className="flex gap-3">
+            <Button variant="success" onClick={handleSubmit} fullWidth>
+              💾 {isEdit ? '保存修改' : '添加Trader'}
+            </Button>
+            <Button variant="danger" onClick={onCancel}>
+              ❌ 取消
+            </Button>
           </div>
-        </div>
+        }
+      >
+        {!isEdit && onApplyTemplate && (
+          <div className="mb-4">
+            <Button variant="secondary" onClick={() => setShowTemplates(true)}>
+              📋 使用模板
+            </Button>
+          </div>
+        )}
 
         <div className="space-y-6">
           {/* 基本信息 */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-bold" style={{ color: '#EAECEF' }}>基本信息</h3>
+          <div>
+            <h3 className="text-lg font-bold mb-4" style={{ color: theme.colors.text.primary }}>
+              基本信息
+            </h3>
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
-                  Trader ID * {!isEdit && <span className="text-xs">(唯一标识，不可重复)</span>}
-                </label>
-                <input
-                  type="text"
-                  value={form.id || ''}
-                  onChange={(e) => setForm({ ...form, id: e.target.value })}
-                  disabled={isEdit}
-                  placeholder="例如: binance_qwen_01"
-                  className="w-full px-4 py-2 rounded-lg"
-                  style={{
-                    background: isEdit ? '#2B3139' : '#0B0E11',
-                    border: '1px solid #2B3139',
-                    color: '#EAECEF'
-                  }}
-                />
-              </div>
-              <div>
-                <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>Trader名称 *</label>
-                <input
-                  type="text"
-                  value={form.name || ''}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  placeholder="例如: 币安Qwen交易员"
-                  className="w-full px-4 py-2 rounded-lg"
-                  style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                />
-              </div>
-              <div>
-                <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>AI模型 *</label>
-                <select
-                  value={form.ai_model || 'deepseek'}
-                  onChange={(e) => setForm({ ...form, ai_model: e.target.value })}
-                  className="w-full px-4 py-2 rounded-lg"
-                  style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                >
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="qwen">Qwen (通义千问)</option>
-                  <option value="custom">Custom API</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>交易平台 *</label>
-                <select
-                  value={form.exchange || 'binance'}
-                  onChange={(e) => setForm({ ...form, exchange: e.target.value })}
-                  className="w-full px-4 py-2 rounded-lg"
-                  style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                >
-                  <option value="binance">Binance (币安)</option>
-                  <option value="hyperliquid">Hyperliquid</option>
-                  <option value="aster">Aster</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>初始资金 (USDT)</label>
-                <input
-                  type="number"
-                  value={form.initial_balance || 1000}
-                  onChange={(e) => setForm({ ...form, initial_balance: parseFloat(e.target.value) })}
-                  className="w-full px-4 py-2 rounded-lg"
-                  style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                />
-              </div>
-              <div>
-                <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>扫描间隔 (分钟)</label>
-                <input
-                  type="number"
-                  value={form.scan_interval_minutes || 3}
-                  onChange={(e) => setForm({ ...form, scan_interval_minutes: parseInt(e.target.value) })}
-                  className="w-full px-4 py-2 rounded-lg"
-                  style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                />
-              </div>
+              <Input
+                label="Trader ID *"
+                hint={!isEdit ? '唯一标识，不可重复' : ''}
+                value={form.id || ''}
+                onChange={(e) => setForm({ ...form, id: e.target.value })}
+                disabled={isEdit}
+                placeholder="例如: binance_qwen_01"
+                fullWidth
+              />
+              <Input
+                label="Trader名称 *"
+                value={form.name || ''}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="例如: 币安Qwen交易员"
+                fullWidth
+              />
+              <Select
+                label="AI模型 *"
+                value={form.ai_model || 'deepseek'}
+                onChange={(e) => setForm({ ...form, ai_model: e.target.value })}
+                fullWidth
+              >
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">Qwen (通义千问)</option>
+                <option value="custom">Custom API</option>
+              </Select>
+              <Select
+                label="交易平台 *"
+                value={form.exchange || 'binance'}
+                onChange={(e) => setForm({ ...form, exchange: e.target.value })}
+                fullWidth
+              >
+                <option value="binance">Binance (币安)</option>
+                <option value="hyperliquid">Hyperliquid</option>
+                <option value="aster">Aster</option>
+              </Select>
+              <Input
+                type="number"
+                label="初始资金 (USDT)"
+                value={form.initial_balance || 1000}
+                onChange={(e) => setForm({ ...form, initial_balance: parseFloat(e.target.value) })}
+                fullWidth
+              />
+              <Input
+                type="number"
+                label="扫描间隔 (分钟)"
+                value={form.scan_interval_minutes || 3}
+                onChange={(e) => setForm({ ...form, scan_interval_minutes: parseInt(e.target.value) })}
+                fullWidth
+              />
             </div>
-            <div className="flex items-center gap-3">
-              <input
-                type="checkbox"
+            <div className="mt-4">
+              <Switch
                 checked={form.enabled ?? true}
                 onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
-                className="w-5 h-5"
-                style={{ accentColor: '#6366F1' }}
+                label="启用该Trader"
               />
-              <label style={{ color: '#EAECEF' }}>启用该Trader</label>
             </div>
           </div>
 
           {/* 交易所配置 */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-bold flex items-center gap-2" style={{ color: '#EAECEF' }}>
-              交易所配置
-              <button
+          <div>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold" style={{ color: theme.colors.text.primary }}>
+                交易所配置
+              </h3>
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => setShowSecrets(!showSecrets)}
-                className="text-sm px-2 py-1 rounded"
-                style={{ background: 'rgba(99, 102, 241, 0.2)', color: '#A78BFA' }}
               >
                 {showSecrets ? '🔓 隐藏密钥' : '🔒 显示密钥'}
-              </button>
-            </h3>
+              </Button>
+            </div>
 
             {form.exchange === 'binance' && (
-              <div className="space-y-4 p-4 rounded-lg" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="font-semibold flex items-center gap-2" style={{ color: '#EAECEF' }}>
-                    🔶 Binance API配置
-                  </h4>
-                  {isEdit && (
-                    <span className="text-xs px-2 py-1 rounded" style={{ background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }}>
-                      ✓ 已配置
-                    </span>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
-                    Binance API Key * {isEdit && <span className="text-xs">(留空保持不变)</span>}
-                  </label>
-                  <input
-                    type={showSecrets ? 'text' : 'password'}
-                    value={form.binance_api_key || ''}
-                    onChange={(e) => setForm({ ...form, binance_api_key: e.target.value })}
-                    placeholder={isEdit ? '••••••••••••••••（已配置）' : '输入您的API Key'}
-                    className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
-                    Binance Secret Key * {isEdit && <span className="text-xs">(留空保持不变)</span>}
-                  </label>
-                  <input
-                    type={showSecrets ? 'text' : 'password'}
-                    value={form.binance_secret_key || ''}
-                    onChange={(e) => setForm({ ...form, binance_secret_key: e.target.value })}
-                    placeholder={isEdit ? '••••••••••••••••（已配置）' : '输入您的Secret Key'}
-                    className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                </div>
+              <div className="space-y-4">
+                <Input
+                  type={showSecrets ? 'text' : 'password'}
+                  label="Binance API Key *"
+                  hint={isEdit ? '留空保持不变' : ''}
+                  value={form.binance_api_key || ''}
+                  onChange={(e) => setForm({ ...form, binance_api_key: e.target.value })}
+                  placeholder={isEdit ? '••••••••••••••••（已配置）' : '输入您的API Key'}
+                  fullWidth
+                />
+                <Input
+                  type={showSecrets ? 'text' : 'password'}
+                  label="Binance Secret Key *"
+                  hint={isEdit ? '留空保持不变' : ''}
+                  value={form.binance_secret_key || ''}
+                  onChange={(e) => setForm({ ...form, binance_secret_key: e.target.value })}
+                  placeholder={isEdit ? '••••••••••••••••（已配置）' : '输入您的Secret Key'}
+                  fullWidth
+                />
               </div>
             )}
 
             {form.exchange === 'hyperliquid' && (
-              <div className="space-y-4 p-4 rounded-lg" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="font-semibold flex items-center gap-2" style={{ color: '#EAECEF' }}>
-                    🌊 Hyperliquid配置
-                  </h4>
-                  {isEdit && (
-                    <span className="text-xs px-2 py-1 rounded" style={{ background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }}>
-                      ✓ 已配置
-                    </span>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
-                    Private Key * {isEdit && <span className="text-xs">(留空保持不变)</span>}
-                  </label>
-                  <input
-                    type={showSecrets ? 'text' : 'password'}
-                    value={form.hyperliquid_private_key || ''}
-                    onChange={(e) => setForm({ ...form, hyperliquid_private_key: e.target.value })}
-                    placeholder={isEdit ? '••••••••••••••••（已配置）' : '输入以太坊私钥（自动去除0x前缀）'}
-                    className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                  <div className="text-xs mt-1" style={{ color: '#848E9C' }}>
-                    💡 系统会自动去除0x前缀，可直接粘贴完整私钥
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>钱包地址</label>
-                  <input
-                    type="text"
-                    value={form.hyperliquid_wallet_addr || ''}
-                    onChange={(e) => setForm({ ...form, hyperliquid_wallet_addr: e.target.value })}
-                    placeholder="0x..."
-                    className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                </div>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    checked={form.hyperliquid_testnet ?? false}
-                    onChange={(e) => setForm({ ...form, hyperliquid_testnet: e.target.checked })}
-                    className="w-5 h-5"
-                    style={{ accentColor: '#6366F1' }}
-                  />
-                  <label style={{ color: '#EAECEF' }}>使用测试网</label>
-                </div>
+              <div className="space-y-4">
+                <Input
+                  type={showSecrets ? 'text' : 'password'}
+                  label="Private Key *"
+                  hint="系统会自动去除0x前缀，可直接粘贴完整私钥"
+                  value={form.hyperliquid_private_key || ''}
+                  onChange={(e) => setForm({ ...form, hyperliquid_private_key: e.target.value })}
+                  placeholder={isEdit ? '••••••••••••••••（已配置）' : '输入以太坊私钥'}
+                  fullWidth
+                />
+                <Input
+                  label="钱包地址"
+                  value={form.hyperliquid_wallet_addr || ''}
+                  onChange={(e) => setForm({ ...form, hyperliquid_wallet_addr: e.target.value })}
+                  placeholder="0x..."
+                  fullWidth
+                />
+                <Switch
+                  checked={form.hyperliquid_testnet ?? false}
+                  onChange={(e) => setForm({ ...form, hyperliquid_testnet: e.target.checked })}
+                  label="使用测试网"
+                />
               </div>
             )}
 
             {form.exchange === 'aster' && (
-              <div className="space-y-4 p-4 rounded-lg" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="font-semibold flex items-center gap-2" style={{ color: '#EAECEF' }}>
-                    ⭐ Aster配置
-                  </h4>
-                  {isEdit && (
-                    <span className="text-xs px-2 py-1 rounded" style={{ background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }}>
-                      ✓ 已配置
-                    </span>
-                  )}
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>主钱包地址 (User) *</label>
-                  <input
-                    type="text"
-                    value={form.aster_user || ''}
-                    onChange={(e) => setForm({ ...form, aster_user: e.target.value })}
-                    placeholder="0x..."
-                    className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>API钱包地址 (Signer) *</label>
-                  <input
-                    type="text"
-                    value={form.aster_signer || ''}
-                    onChange={(e) => setForm({ ...form, aster_signer: e.target.value })}
-                    placeholder="0x..."
-                    className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>
-                    API钱包私钥 * {isEdit && <span className="text-xs">(留空保持不变)</span>}
-                  </label>
-                  <input
-                    type={showSecrets ? 'text' : 'password'}
-                    value={form.aster_private_key || ''}
-                    onChange={(e) => setForm({ ...form, aster_private_key: e.target.value })}
-                    placeholder={isEdit ? '••••••••••••••••（已配置）' : '输入私钥（自动去除0x前缀）'}
-                    className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                  <div className="text-xs mt-1" style={{ color: '#848E9C' }}>
-                    💡 系统会自动去除0x前缀，可直接粘贴完整私钥
-                  </div>
-                </div>
+              <div className="space-y-4">
+                <Input
+                  label="主钱包地址 (User) *"
+                  value={form.aster_user || ''}
+                  onChange={(e) => setForm({ ...form, aster_user: e.target.value })}
+                  placeholder="0x..."
+                  fullWidth
+                />
+                <Input
+                  label="API钱包地址 (Signer) *"
+                  value={form.aster_signer || ''}
+                  onChange={(e) => setForm({ ...form, aster_signer: e.target.value })}
+                  placeholder="0x..."
+                  fullWidth
+                />
+                <Input
+                  type={showSecrets ? 'text' : 'password'}
+                  label="API钱包私钥 *"
+                  hint="系统会自动去除0x前缀"
+                  value={form.aster_private_key || ''}
+                  onChange={(e) => setForm({ ...form, aster_private_key: e.target.value })}
+                  placeholder={isEdit ? '••••••••••••••••（已配置）' : '输入私钥'}
+                  fullWidth
+                />
               </div>
             )}
           </div>
 
           {/* AI配置 */}
-          <div className="space-y-4">
-            <h3 className="text-lg font-bold" style={{ color: '#EAECEF' }}>AI配置</h3>
-            {form.ai_model === 'qwen' && (
-              <div>
-                <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>Qwen API Key *</label>
-                <input
-                  type={showSecrets ? 'text' : 'password'}
-                  value={form.qwen_key || ''}
-                  onChange={(e) => setForm({ ...form, qwen_key: e.target.value })}
-                  placeholder={isEdit ? '留空则保留原值' : '输入Qwen API Key'}
-                  className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                  style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
+          <div>
+            <h3 className="text-lg font-bold mb-4" style={{ color: theme.colors.text.primary }}>
+              AI配置
+            </h3>
+            
+            {/* AI模式配置 */}
+            <div className="space-y-3 mb-6 p-4 rounded-lg" style={{ background: theme.colors.background.tertiary }}>
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="font-medium" style={{ color: theme.colors.text.primary }}>
+                    🚀 AI完全自主模式
+                  </span>
+                  <div className="text-sm mt-1" style={{ color: theme.colors.text.secondary }}>
+                    开启后AI将不受风控限制，完全自主决策（高风险）
+                  </div>
+                </div>
+                <Switch
+                  checked={form.ai_autonomy_mode ?? false}
+                  onChange={(e) => setForm({ ...form, ai_autonomy_mode: e.target.checked })}
                 />
               </div>
+              
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="font-medium" style={{ color: theme.colors.text.primary }}>
+                    📦 数据紧凑模式
+                  </span>
+                  <div className="text-sm mt-1" style={{ color: theme.colors.text.secondary }}>
+                    精简候选币种数据，提升AI响应速度（推荐开启）
+                  </div>
+                </div>
+                <Switch
+                  checked={form.compact_mode ?? true}
+                  onChange={(e) => setForm({ ...form, compact_mode: e.target.checked })}
+                />
+              </div>
+            </div>
+            
+            {form.ai_model === 'qwen' && (
+              <Input
+                type={showSecrets ? 'text' : 'password'}
+                label="Qwen API Key *"
+                value={form.qwen_key || ''}
+                onChange={(e) => setForm({ ...form, qwen_key: e.target.value })}
+                placeholder={isEdit ? '留空则保留原值' : '输入Qwen API Key'}
+                fullWidth
+              />
             )}
             {form.ai_model === 'deepseek' && (
-              <div>
-                <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>DeepSeek API Key *</label>
-                <input
-                  type={showSecrets ? 'text' : 'password'}
-                  value={form.deepseek_key || ''}
-                  onChange={(e) => setForm({ ...form, deepseek_key: e.target.value })}
-                  placeholder={isEdit ? '留空则保留原值' : '输入DeepSeek API Key'}
-                  className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                  style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                />
-              </div>
+              <Input
+                type={showSecrets ? 'text' : 'password'}
+                label="DeepSeek API Key *"
+                value={form.deepseek_key || ''}
+                onChange={(e) => setForm({ ...form, deepseek_key: e.target.value })}
+                placeholder={isEdit ? '留空则保留原值' : '输入DeepSeek API Key'}
+                fullWidth
+              />
             )}
             {form.ai_model === 'custom' && (
               <div className="space-y-4">
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>API URL *</label>
-                  <input
-                    type="text"
-                    value={form.custom_api_url || ''}
-                    onChange={(e) => setForm({ ...form, custom_api_url: e.target.value })}
-                    placeholder="https://api.openai.com/v1"
-                    className="w-full px-4 py-2 rounded-lg"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>API Key *</label>
-                  <input
-                    type={showSecrets ? 'text' : 'password'}
-                    value={form.custom_api_key || ''}
-                    onChange={(e) => setForm({ ...form, custom_api_key: e.target.value })}
-                    placeholder={isEdit ? '留空则保留原值' : 'sk-...'}
-                    className="w-full px-4 py-2 rounded-lg font-mono text-sm"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm mb-2" style={{ color: '#848E9C' }}>模型名称 *</label>
-                  <input
-                    type="text"
-                    value={form.custom_model_name || ''}
-                    onChange={(e) => setForm({ ...form, custom_model_name: e.target.value })}
-                    placeholder="gpt-4o"
-                    className="w-full px-4 py-2 rounded-lg"
-                    style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}
-                  />
-                </div>
+                <Input
+                  label="API URL *"
+                  value={form.custom_api_url || ''}
+                  onChange={(e) => setForm({ ...form, custom_api_url: e.target.value })}
+                  placeholder="https://api.openai.com/v1"
+                  fullWidth
+                />
+                <Input
+                  type={showSecrets ? 'text' : 'password'}
+                  label="API Key *"
+                  value={form.custom_api_key || ''}
+                  onChange={(e) => setForm({ ...form, custom_api_key: e.target.value })}
+                  placeholder={isEdit ? '留空则保留原值' : 'sk-...'}
+                  fullWidth
+                />
+                <Input
+                  label="模型名称 *"
+                  value={form.custom_model_name || ''}
+                  onChange={(e) => setForm({ ...form, custom_model_name: e.target.value })}
+                  placeholder="gpt-4o"
+                  fullWidth
+                />
               </div>
             )}
           </div>
-
-          {/* 按钮 */}
-          <div className="flex gap-3 pt-4">
-            <button
-              onClick={handleSubmit}
-              className="flex-1 px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
-              style={{
-                background: 'linear-gradient(135deg, #10B981 0%, #0ECB81 100%)',
-                color: '#FFFFFF',
-                boxShadow: '0 4px 16px rgba(16, 185, 129, 0.3)'
-              }}
-            >
-              💾 {isEdit ? '保存修改' : '添加Trader'}
-            </button>
-            <button
-              onClick={onCancel}
-              className="px-6 py-3 rounded-xl font-bold transition-all hover:scale-105"
-              style={{
-                background: 'rgba(248, 113, 113, 0.2)',
-                color: '#FCA5A5',
-                border: '1px solid rgba(248, 113, 113, 0.3)'
-              }}
-            >
-              ❌ 取消
-            </button>
-          </div>
         </div>
-      </div>
-    </div>
+      </Modal>
+
+      {/* 模板选择弹窗 */}
+      {showTemplates && (
+        <Modal
+          isOpen={true}
+          onClose={() => setShowTemplates(false)}
+          title="📋 选择配置模板"
+          maxWidth="lg"
+        >
+          <div className="space-y-3">
+            {TRADER_TEMPLATES.map((template, i) => (
+              <button
+                key={i}
+                onClick={() => applyTemplate(template.template)}
+                className="w-full p-4 rounded-xl text-left transition-all hover:scale-105"
+                style={{
+                  background: theme.colors.background.tertiary,
+                  border: `1px solid ${theme.colors.purple.border}`,
+                }}
+              >
+                <div className="font-bold mb-1" style={{ color: theme.colors.text.primary }}>
+                  {template.name}
+                </div>
+                <div className="text-sm" style={{ color: theme.colors.text.secondary }}>
+                  {template.template.exchange?.toUpperCase()} + {template.template.ai_model?.toUpperCase()}
+                </div>
+              </button>
+            ))}
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }

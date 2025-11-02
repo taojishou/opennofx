@@ -1,9 +1,13 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"nofx/config"
+	"nofx/database"
+	"nofx/database/models"
+	"nofx/database/repositories"
 	"sync"
 
 	"github.com/gin-gonic/gin"
@@ -13,12 +17,19 @@ var (
 	configMutex sync.RWMutex
 )
 
-// GetConfigHandler 获取完整配置（脱敏）
+// isMaskedKey 检查密钥是否是脱敏后的值
+// 脱敏格式: "xxxx****xxxx" 或 "****"
+func isMaskedKey(key string) bool {
+	return key == "****" || len(key) > 4 && key[len(key)/2-2:len(key)/2+2] == "****"
+}
+
+// handleGetConfig 获取完整配置（脱敏）- 从数据库加载
 func (s *Server) handleGetConfig(c *gin.Context) {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 
-	cfg, err := config.LoadConfig(config.GetConfigFilePath())
+	// 从数据库加载配置
+	cfg, err := database.LoadConfigFromDB()
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("加载配置失败: %v", err)})
 		return
@@ -33,24 +44,26 @@ func (s *Server) handleGetConfig(c *gin.Context) {
 	})
 }
 
-// UpdateGlobalConfigHandler 更新全局配置
+// handleUpdateGlobalConfig 更新全局配置 - 更新到数据库
 func (s *Server) handleUpdateGlobalConfig(c *gin.Context) {
 	configMutex.Lock()
 	defer configMutex.Unlock()
 
 	var req struct {
-		UseDefaultCoins    *bool                   `json:"use_default_coins"`
-		DefaultCoins       []string                `json:"default_coins"`
-		CoinPoolAPIURL     *string                 `json:"coin_pool_api_url"`
-		OITopAPIURL        *string                 `json:"oi_top_api_url"`
-		MaxPositions       *int                    `json:"max_positions"`
-		MaxDailyLoss       *float64                `json:"max_daily_loss"`
-		MaxDrawdown        *float64                `json:"max_drawdown"`
-		StopTradingMinutes *int                    `json:"stop_trading_minutes"`
-		BTCETHLeverage     *int                    `json:"btc_eth_leverage"`
-		AltcoinLeverage    *int                    `json:"altcoin_leverage"`
-		EnableAILearning   *bool                   `json:"enable_ai_learning"`
-		AILearnInterval    *int                    `json:"ai_learn_interval"`
+		UseDefaultCoins    *bool                    `json:"use_default_coins"`
+		DefaultCoins       []string                 `json:"default_coins"`
+		CoinPoolAPIURL     *string                  `json:"coin_pool_api_url"`
+		OITopAPIURL        *string                  `json:"oi_top_api_url"`
+		MaxPositions       *int                     `json:"max_positions"`
+		MaxDailyLoss       *float64                 `json:"max_daily_loss"`
+		MaxDrawdown        *float64                 `json:"max_drawdown"`
+		StopTradingMinutes *int                     `json:"stop_trading_minutes"`
+		BTCETHLeverage     *int                     `json:"btc_eth_leverage"`
+		AltcoinLeverage    *int                     `json:"altcoin_leverage"`
+		EnableAILearning   *bool                    `json:"enable_ai_learning"`
+		AILearnInterval    *int                     `json:"ai_learn_interval"`
+		AIAutonomyMode     *bool                    `json:"ai_autonomy_mode"`
+		CompactMode        *bool                    `json:"compact_mode"`
 		MarketData         *config.MarketDataConfig `json:"market_data"`
 	}
 
@@ -59,63 +72,72 @@ func (s *Server) handleUpdateGlobalConfig(c *gin.Context) {
 		return
 	}
 
-	cfg, err := config.LoadConfig(config.GetConfigFilePath())
+	// 连接系统数据库
+	sysConn, err := database.NewSystemConnection()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("加载配置失败: %v", err)})
+		c.JSON(500, gin.H{"error": fmt.Sprintf("连接数据库失败: %v", err)})
 		return
 	}
+	defer sysConn.Close()
 
-	// 更新配置
+	repo := repositories.NewSystemConfigRepository(sysConn.DB())
+
+	// 更新系统配置到数据库
 	if req.UseDefaultCoins != nil {
-		cfg.UseDefaultCoins = *req.UseDefaultCoins
+		val := fmt.Sprintf("%v", *req.UseDefaultCoins)
+		repo.Set("use_default_coins", val, "是否使用默认币种列表", "market")
 	}
 	if req.DefaultCoins != nil {
-		cfg.DefaultCoins = req.DefaultCoins
+		jsonData, _ := json.Marshal(req.DefaultCoins)
+		repo.Set("default_coins", string(jsonData), "默认币种列表", "market")
 	}
 	if req.CoinPoolAPIURL != nil {
-		cfg.CoinPoolAPIURL = *req.CoinPoolAPIURL
+		repo.Set("coin_pool_api_url", *req.CoinPoolAPIURL, "币种池API地址", "market")
 	}
 	if req.OITopAPIURL != nil {
-		cfg.OITopAPIURL = *req.OITopAPIURL
-	}
-	if req.MaxPositions != nil {
-		cfg.MaxPositions = *req.MaxPositions
-	}
-	if req.MaxDailyLoss != nil {
-		cfg.MaxDailyLoss = *req.MaxDailyLoss
-	}
-	if req.MaxDrawdown != nil {
-		cfg.MaxDrawdown = *req.MaxDrawdown
-	}
-	if req.StopTradingMinutes != nil {
-		cfg.StopTradingMinutes = *req.StopTradingMinutes
-	}
-	if req.BTCETHLeverage != nil {
-		cfg.Leverage.BTCETHLeverage = *req.BTCETHLeverage
-	}
-	if req.AltcoinLeverage != nil {
-		cfg.Leverage.AltcoinLeverage = *req.AltcoinLeverage
-	}
-	if req.EnableAILearning != nil {
-		cfg.EnableAILearning = *req.EnableAILearning
-	}
-	if req.AILearnInterval != nil {
-		cfg.AILearnInterval = *req.AILearnInterval
+		repo.Set("oi_top_api_url", *req.OITopAPIURL, "持仓量TopAPI地址", "market")
 	}
 	if req.MarketData != nil {
-		cfg.MarketData = *req.MarketData
+		jsonData, _ := json.Marshal(req.MarketData.Klines)
+		repo.Set("kline_settings", string(jsonData), "K线配置", "market")
 	}
 
-	// 验证配置
-	if err := cfg.Validate(); err != nil {
-		c.JSON(400, gin.H{"error": fmt.Sprintf("配置验证失败: %v", err)})
-		return
-	}
-
-	// 保存配置
-	if err := config.SaveConfig(config.GetConfigFilePath(), cfg); err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("保存配置失败: %v", err)})
-		return
+	// 更新第一个trader的配置（全局配置）
+	traderRepo := repositories.NewTraderConfigRepository(sysConn.DB())
+	traders, err := traderRepo.GetAllEnabled()
+	if err == nil && len(traders) > 0 {
+		trader := traders[0]
+		if req.MaxPositions != nil {
+			trader.MaxPositions = *req.MaxPositions
+		}
+		if req.MaxDailyLoss != nil {
+			trader.MaxDailyLoss = *req.MaxDailyLoss
+		}
+		if req.MaxDrawdown != nil {
+			trader.MaxDrawdown = *req.MaxDrawdown
+		}
+		if req.StopTradingMinutes != nil {
+			trader.StopTradingMinutes = *req.StopTradingMinutes
+		}
+		if req.BTCETHLeverage != nil {
+			trader.BTCETHLeverage = *req.BTCETHLeverage
+		}
+		if req.AltcoinLeverage != nil {
+			trader.AltcoinLeverage = *req.AltcoinLeverage
+		}
+		if req.EnableAILearning != nil {
+			trader.EnableAILearning = *req.EnableAILearning
+		}
+		if req.AILearnInterval != nil {
+			trader.AILearnInterval = *req.AILearnInterval
+		}
+		if req.AIAutonomyMode != nil {
+			trader.AIAutonomyMode = *req.AIAutonomyMode
+		}
+		if req.CompactMode != nil {
+			trader.CompactMode = *req.CompactMode
+		}
+		traderRepo.Update(trader)
 	}
 
 	log.Println("✓ 全局配置已更新")
@@ -126,7 +148,7 @@ func (s *Server) handleUpdateGlobalConfig(c *gin.Context) {
 	})
 }
 
-// UpdateTraderConfigHandler 更新单个Trader配置
+// handleUpdateTraderConfig 更新单个Trader配置 - 更新到数据库
 func (s *Server) handleUpdateTraderConfig(c *gin.Context) {
 	configMutex.Lock()
 	defer configMutex.Unlock()
@@ -138,73 +160,70 @@ func (s *Server) handleUpdateTraderConfig(c *gin.Context) {
 		return
 	}
 
-	cfg, err := config.LoadConfig(config.GetConfigFilePath())
+	// 连接系统数据库
+	sysConn, err := database.NewSystemConnection()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("加载配置失败: %v", err)})
+		c.JSON(500, gin.H{"error": fmt.Sprintf("连接数据库失败: %v", err)})
 		return
 	}
+	defer sysConn.Close()
 
-	// 查找并更新trader
-	found := false
-	for i, trader := range cfg.Traders {
-		if trader.ID == req.ID {
-			// 保留原密钥（如果新请求中的密钥是脱敏的）
-			if req.BinanceAPIKey != "" && req.BinanceAPIKey != "****" && len(req.BinanceAPIKey) > 8 {
-				trader.BinanceAPIKey = req.BinanceAPIKey
-			}
-			if req.BinanceSecretKey != "" && req.BinanceSecretKey != "****" && len(req.BinanceSecretKey) > 8 {
-				trader.BinanceSecretKey = req.BinanceSecretKey
-			}
-			if req.HyperliquidPrivateKey != "" && req.HyperliquidPrivateKey != "****" && len(req.HyperliquidPrivateKey) > 8 {
-				trader.HyperliquidPrivateKey = req.HyperliquidPrivateKey
-			}
-			if req.AsterPrivateKey != "" && req.AsterPrivateKey != "****" && len(req.AsterPrivateKey) > 8 {
-				trader.AsterPrivateKey = req.AsterPrivateKey
-			}
-			if req.QwenKey != "" && req.QwenKey != "****" && len(req.QwenKey) > 8 {
-				trader.QwenKey = req.QwenKey
-			}
-			if req.DeepSeekKey != "" && req.DeepSeekKey != "****" && len(req.DeepSeekKey) > 8 {
-				trader.DeepSeekKey = req.DeepSeekKey
-			}
-			if req.CustomAPIKey != "" && req.CustomAPIKey != "****" && len(req.CustomAPIKey) > 8 {
-				trader.CustomAPIKey = req.CustomAPIKey
-			}
+	traderRepo := repositories.NewTraderConfigRepository(sysConn.DB())
 
-			// 更新其他字段
-			trader.Name = req.Name
-			trader.Enabled = req.Enabled
-			trader.AIModel = req.AIModel
-			trader.Exchange = req.Exchange
-			trader.HyperliquidWalletAddr = req.HyperliquidWalletAddr
-			trader.HyperliquidTestnet = req.HyperliquidTestnet
-			trader.AsterUser = req.AsterUser
-			trader.AsterSigner = req.AsterSigner
-			trader.CustomAPIURL = req.CustomAPIURL
-			trader.CustomModelName = req.CustomModelName
-			trader.InitialBalance = req.InitialBalance
-			trader.ScanIntervalMinutes = req.ScanIntervalMinutes
-
-			cfg.Traders[i] = trader
-			found = true
-			break
-		}
-	}
-
-	if !found {
+	// 查找trader
+	dbTrader, err := traderRepo.GetByTraderID(req.ID)
+	if err != nil {
 		c.JSON(404, gin.H{"error": "Trader不存在"})
 		return
 	}
 
-	// 验证配置
-	if err := cfg.Validate(); err != nil {
-		c.JSON(400, gin.H{"error": fmt.Sprintf("配置验证失败: %v", err)})
-		return
+	// 保留原密钥（如果新请求中的密钥是脱敏的则不更新）
+	// 脱敏格式: "xxxx****xxxx"，所以检查是否包含****
+	if req.BinanceAPIKey != "" && !isMaskedKey(req.BinanceAPIKey) {
+		dbTrader.BinanceAPIKey = req.BinanceAPIKey
+	}
+	if req.BinanceSecretKey != "" && !isMaskedKey(req.BinanceSecretKey) {
+		dbTrader.BinanceSecretKey = req.BinanceSecretKey
+	}
+	if req.HyperliquidPrivateKey != "" && !isMaskedKey(req.HyperliquidPrivateKey) {
+		dbTrader.HyperliquidPrivateKey = req.HyperliquidPrivateKey
+	}
+	if req.AsterPrivateKey != "" && !isMaskedKey(req.AsterPrivateKey) {
+		dbTrader.AsterPrivateKey = req.AsterPrivateKey
+	}
+	if req.QwenKey != "" && !isMaskedKey(req.QwenKey) {
+		dbTrader.QwenKey = req.QwenKey
+	}
+	if req.DeepSeekKey != "" && !isMaskedKey(req.DeepSeekKey) {
+		dbTrader.DeepSeekKey = req.DeepSeekKey
+	}
+	if req.CustomAPIKey != "" && !isMaskedKey(req.CustomAPIKey) {
+		dbTrader.CustomAPIKey = req.CustomAPIKey
 	}
 
-	// 保存配置
-	if err := config.SaveConfig(config.GetConfigFilePath(), cfg); err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("保存配置失败: %v", err)})
+	// 打印接收到的数据用于调试
+	log.Printf("[DEBUG] 接收到的Trader数据: ID=%s, AIAutonomyMode=%v, CompactMode=%v", 
+		req.ID, req.AIAutonomyMode, req.CompactMode)
+	
+	// 更新其他字段
+	dbTrader.Name = req.Name
+	dbTrader.Enabled = req.Enabled
+	dbTrader.AIModel = req.AIModel
+	dbTrader.Exchange = req.Exchange
+	dbTrader.HyperliquidWalletAddr = req.HyperliquidWalletAddr
+	dbTrader.HyperliquidTestnet = req.HyperliquidTestnet
+	dbTrader.AsterUser = req.AsterUser
+	dbTrader.AsterSigner = req.AsterSigner
+	dbTrader.CustomAPIURL = req.CustomAPIURL
+	dbTrader.CustomModelName = req.CustomModelName
+	dbTrader.InitialBalance = req.InitialBalance
+	dbTrader.ScanIntervalMinutes = req.ScanIntervalMinutes
+	dbTrader.AIAutonomyMode = req.AIAutonomyMode
+	dbTrader.CompactMode = req.CompactMode
+
+	// 更新到数据库
+	if err := traderRepo.Update(dbTrader); err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("更新失败: %v", err)})
 		return
 	}
 
@@ -216,7 +235,7 @@ func (s *Server) handleUpdateTraderConfig(c *gin.Context) {
 	})
 }
 
-// AddTraderHandler 添加新Trader
+// handleAddTrader 添加新Trader - 保存到数据库
 func (s *Server) handleAddTrader(c *gin.Context) {
 	configMutex.Lock()
 	defer configMutex.Unlock()
@@ -228,32 +247,61 @@ func (s *Server) handleAddTrader(c *gin.Context) {
 		return
 	}
 
-	cfg, err := config.LoadConfig(config.GetConfigFilePath())
+	// 连接系统数据库
+	sysConn, err := database.NewSystemConnection()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("加载配置失败: %v", err)})
+		c.JSON(500, gin.H{"error": fmt.Sprintf("连接数据库失败: %v", err)})
 		return
 	}
+	defer sysConn.Close()
+
+	traderRepo := repositories.NewTraderConfigRepository(sysConn.DB())
 
 	// 检查ID是否已存在
-	for _, trader := range cfg.Traders {
-		if trader.ID == req.ID {
-			c.JSON(400, gin.H{"error": "Trader ID已存在"})
-			return
-		}
-	}
-
-	// 添加新trader
-	cfg.Traders = append(cfg.Traders, req)
-
-	// 验证配置
-	if err := cfg.Validate(); err != nil {
-		c.JSON(400, gin.H{"error": fmt.Sprintf("配置验证失败: %v", err)})
+	_, err = traderRepo.GetByTraderID(req.ID)
+	if err == nil {
+		c.JSON(400, gin.H{"error": "Trader ID已存在"})
 		return
 	}
 
-	// 保存配置
-	if err := config.SaveConfig(config.GetConfigFilePath(), cfg); err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("保存配置失败: %v", err)})
+	// 转换为数据库模型
+	dbTrader := &models.TraderConfig{
+		UserID:                0, // 系统默认
+		TraderID:              req.ID,
+		Name:                  req.Name,
+		Enabled:               req.Enabled,
+		AIModel:               req.AIModel,
+		Exchange:              req.Exchange,
+		BinanceAPIKey:         req.BinanceAPIKey,
+		BinanceSecretKey:      req.BinanceSecretKey,
+		HyperliquidPrivateKey: req.HyperliquidPrivateKey,
+		HyperliquidWalletAddr: req.HyperliquidWalletAddr,
+		HyperliquidTestnet:    req.HyperliquidTestnet,
+		AsterUser:             req.AsterUser,
+		AsterSigner:           req.AsterSigner,
+		AsterPrivateKey:       req.AsterPrivateKey,
+		DeepSeekKey:           req.DeepSeekKey,
+		QwenKey:               req.QwenKey,
+		CustomAPIURL:          req.CustomAPIURL,
+		CustomAPIKey:          req.CustomAPIKey,
+		CustomModelName:       req.CustomModelName,
+		InitialBalance:        req.InitialBalance,
+		ScanIntervalMinutes:   req.ScanIntervalMinutes,
+		MaxPositions:          3,
+		BTCETHLeverage:        5,
+		AltcoinLeverage:       5,
+		MaxDailyLoss:          0,
+		MaxDrawdown:           0,
+		StopTradingMinutes:    0,
+		EnableAILearning:      false,
+		AILearnInterval:       10,
+		AIAutonomyMode:        false,
+		CompactMode:           true, // 默认启用紧凑模式
+	}
+
+	// 保存到数据库
+	if _, err := traderRepo.Create(dbTrader); err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("保存失败: %v", err)})
 		return
 	}
 
@@ -265,7 +313,7 @@ func (s *Server) handleAddTrader(c *gin.Context) {
 	})
 }
 
-// DeleteTraderHandler 删除Trader
+// handleDeleteTrader 删除Trader - 从数据库删除
 func (s *Server) handleDeleteTrader(c *gin.Context) {
 	configMutex.Lock()
 	defer configMutex.Unlock()
@@ -276,33 +324,26 @@ func (s *Server) handleDeleteTrader(c *gin.Context) {
 		return
 	}
 
-	cfg, err := config.LoadConfig(config.GetConfigFilePath())
+	// 连接系统数据库
+	sysConn, err := database.NewSystemConnection()
 	if err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("加载配置失败: %v", err)})
+		c.JSON(500, gin.H{"error": fmt.Sprintf("连接数据库失败: %v", err)})
 		return
 	}
+	defer sysConn.Close()
 
-	// 查找并删除trader
-	found := false
-	newTraders := make([]config.TraderConfig, 0, len(cfg.Traders))
-	for _, trader := range cfg.Traders {
-		if trader.ID != traderID {
-			newTraders = append(newTraders, trader)
-		} else {
-			found = true
-		}
-	}
+	traderRepo := repositories.NewTraderConfigRepository(sysConn.DB())
 
-	if !found {
+	// 查找trader
+	dbTrader, err := traderRepo.GetByTraderID(traderID)
+	if err != nil {
 		c.JSON(404, gin.H{"error": "Trader不存在"})
 		return
 	}
 
-	cfg.Traders = newTraders
-
-	// 保存配置
-	if err := config.SaveConfig(config.GetConfigFilePath(), cfg); err != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("保存配置失败: %v", err)})
+	// 删除
+	if err := traderRepo.Delete(dbTrader.ID); err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("删除失败: %v", err)})
 		return
 	}
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"nofx/database/models"
 	"nofx/manager"
 
 	"github.com/gin-gonic/gin"
@@ -86,12 +87,19 @@ func (s *Server) setupRoutes() {
 		api.DELETE("/prompts/delete", s.handleDeletePrompt)
 		api.GET("/prompts/preview", s.handlePreviewPrompt)
 
-		// 系统配置管理路由
+		// 系统配置管理路由（通用配置管理）
 		api.GET("/config", s.handleGetConfig)
 		api.POST("/config/global/update", s.handleUpdateGlobalConfig)
 		api.POST("/config/trader/update", s.handleUpdateTraderConfig)
 		api.POST("/config/trader/add", s.handleAddTrader)
 		api.DELETE("/config/trader/delete", s.handleDeleteTrader)
+
+		// 系统运行时配置API（风险阈值、技术指标等可配置参数）
+		api.GET("/system/configs", s.handleGetSystemConfigs)              // 获取所有配置
+		api.GET("/system/configs/:type", s.handleGetConfigByType)         // 按类型获取配置
+		api.PUT("/system/configs", s.handleUpdateSystemConfig)            // 更新单个配置
+		api.PUT("/system/configs/batch", s.handleBatchUpdateConfigs)      // 批量更新配置
+		api.POST("/system/configs/:key/reset", s.handleResetConfig)       // 重置配置
 		
 		// 热重载路由
 		api.POST("/config/reload", s.handleReloadConfig)
@@ -447,7 +455,7 @@ func (s *Server) handleGetPrompts(c *gin.Context) {
 		return
 	}
 
-	configs, err := db.GetAllPromptConfigs()
+	configs, err := db.Config().GetAll()
 	if err != nil {
 		log.Printf("获取prompt配置失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取配置失败"})
@@ -478,12 +486,35 @@ func (s *Server) handleUpdatePrompt(c *gin.Context) {
 		SectionName  string `json:"section_name"`
 		Title        string `json:"title"`
 		Content      string `json:"content"`
+		PromptType   string `json:"prompt_type"`
 		Enabled      bool   `json:"enabled"`
 		DisplayOrder int    `json:"display_order"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// 设置默认的prompt_type
+	if req.PromptType == "" {
+		req.PromptType = "system"
+	}
+
+	// 验证prompt_type
+	if req.PromptType != "system" && req.PromptType != "user" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "prompt_type must be 'system' or 'user'"})
+		return
+	}
+
+	// 设置默认的prompt_type
+	if req.PromptType == "" {
+		req.PromptType = "system"
+	}
+
+	// 验证prompt_type
+	if req.PromptType != "system" && req.PromptType != "user" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "prompt_type must be 'system' or 'user'"})
 		return
 	}
 
@@ -498,9 +529,16 @@ func (s *Server) handleUpdatePrompt(c *gin.Context) {
 		return
 	}
 
-	cfg := db.NewPromptConfig(req.SectionName, req.Title, req.Content, req.Enabled, req.DisplayOrder)
+	cfg := &models.PromptConfig{
+		SectionName:  req.SectionName,
+		Title:        req.Title,
+		Content:      req.Content,
+		PromptType:   req.PromptType,
+		Enabled:      req.Enabled,
+		DisplayOrder: req.DisplayOrder,
+	}
 
-	if err := db.UpdatePromptConfig(cfg); err != nil {
+	if err := db.Config().Update(cfg); err != nil {
 		log.Printf("更新prompt配置失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败"})
 		return
@@ -544,7 +582,7 @@ func (s *Server) handleTogglePrompt(c *gin.Context) {
 		return
 	}
 
-	configs, err := db.GetAllPromptConfigs()
+	configs, err := db.Config().GetAll()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取配置失败"})
 		return
@@ -554,7 +592,7 @@ func (s *Server) handleTogglePrompt(c *gin.Context) {
 	for _, cfg := range configs {
 		if cfg.SectionName == req.SectionName {
 			cfg.Enabled = req.Enabled
-			if err := db.UpdatePromptConfig(cfg); err != nil {
+			if err := db.Config().Update(cfg); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败"})
 				return
 			}
@@ -610,8 +648,16 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 	// 获取杠杆配置（简化处理，使用默认值）
 	btcLeverage := 3
 	altLeverage := 10
+	
+	// 计算实际仓位限制（简化版，使用默认风控参数）
+	// 实际系统会根据账户状态动态调整
+	baseMaxBTC := accountEquity * 30.0
+	baseMaxAlt := accountEquity * 20.0
+	actualMaxBTC := baseMaxBTC * 0.85 // 默认应用85%信心度调整
+	actualMaxAlt := baseMaxAlt * 0.85
 
-	prompt := db.BuildSystemPromptFromDB(accountEquity, btcLeverage, altLeverage)
+	// 预览时默认使用限制模式（false），展示完整规则
+	prompt := db.BuildSystemPromptFromDB(accountEquity, btcLeverage, altLeverage, actualMaxBTC, actualMaxAlt, false)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
@@ -667,6 +713,7 @@ func (s *Server) handleAddPrompt(c *gin.Context) {
 		SectionName  string `json:"section_name"`
 		Title        string `json:"title"`
 		Content      string `json:"content"`
+		PromptType   string `json:"prompt_type"`
 		Enabled      bool   `json:"enabled"`
 		DisplayOrder int    `json:"display_order"`
 	}
@@ -688,7 +735,7 @@ func (s *Server) handleAddPrompt(c *gin.Context) {
 	}
 
 	// 检查是否已存在
-	existing, _ := db.GetAllPromptConfigs()
+	existing, _ := db.Config().GetAll()
 	for _, cfg := range existing {
 		if cfg.SectionName == req.SectionName {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "该section_name已存在"})
@@ -708,8 +755,15 @@ func (s *Server) handleAddPrompt(c *gin.Context) {
 	}
 
 	// 插入新配置
-	cfg := db.NewPromptConfig(req.SectionName, req.Title, req.Content, req.Enabled, req.DisplayOrder)
-	if err := db.AddPromptConfig(cfg); err != nil {
+	cfg := &models.PromptConfig{
+		SectionName:  req.SectionName,
+		Title:        req.Title,
+		Content:      req.Content,
+		PromptType:   req.PromptType,
+		Enabled:      req.Enabled,
+		DisplayOrder: req.DisplayOrder,
+	}
+	if err := db.Config().Insert(cfg); err != nil{
 		log.Printf("添加prompt配置失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "添加配置失败"})
 		return
@@ -750,7 +804,7 @@ func (s *Server) handleDeletePrompt(c *gin.Context) {
 	}
 
 	// 删除配置
-	rows, err := db.DeletePromptConfig(sectionName)
+	rows, err := db.Config().Delete(sectionName)
 	if err != nil {
 		log.Printf("删除prompt配置失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除配置失败"})

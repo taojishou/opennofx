@@ -26,6 +26,22 @@ type Data struct {
 	IntradaySeries    *IntradayData
 	LongerTermContext *LongerTermData
 	AllTimeframes     []*TimeframeData // 所有配置的时间框架数据
+	
+	// 增强技术指标
+	EnhancedIndicators *EnhancedIndicators `json:"enhanced_indicators,omitempty"`
+	MarketSentiment    *MarketSentiment    `json:"market_sentiment,omitempty"`
+	
+	// 多空比数据（多时间周期）
+	LongShortRatios map[string]*LongShortRatioData `json:"long_short_ratios,omitempty"`
+}
+
+// LongShortRatioData 多空比数据
+type LongShortRatioData struct {
+	Period         string  // 时间周期 (5m, 15m, 1h, 4h)
+	LongShortRatio float64 // 多空比 (多头/空头)
+	LongAccount    float64 // 多头账户占比
+	ShortAccount   float64 // 空头账户占比
+	Timestamp      int64   // 时间戳
 }
 
 // OIData Open Interest数据
@@ -261,7 +277,14 @@ func Get(symbol string) (*Data, error) {
 		allTimeframes = append(allTimeframes, tfData)
 	}
 
-	return &Data{
+	// 计算增强技术指标 (使用4小时K线数据，更稳定)
+	var enhancedIndicators *EnhancedIndicators
+	
+	if len(klines4h) >= 50 {
+		enhancedIndicators = CalculateEnhancedIndicators(klines4h)
+	}
+
+	data := &Data{
 		Symbol:            symbol,
 		CurrentPrice:      currentPrice,
 		PriceChange1h:     priceChange1h,
@@ -274,7 +297,23 @@ func Get(symbol string) (*Data, error) {
 		IntradaySeries:    intradayData,
 		LongerTermContext: longerTermData,
 		AllTimeframes:     allTimeframes,
-	}, nil
+		EnhancedIndicators: enhancedIndicators,
+	}
+	
+	// 获取多空比数据（多时间周期）
+	longShortRatios, err := getLongShortRatios(symbol)
+	if err != nil {
+		log.Printf("⚠️ 获取%s多空比失败: %v", symbol, err)
+	} else {
+		data.LongShortRatios = longShortRatios
+	}
+	
+	// 计算市场情绪分析
+	if enhancedIndicators != nil {
+		data.MarketSentiment = AnalyzeMarketSentiment(data, enhancedIndicators)
+	}
+
+	return data, nil
 }
 
 // fetchTimeframeData 获取单个时间框架的完整数据
@@ -713,9 +752,202 @@ func Format(data *Data) string {
 	return FormatWithKlineTable(data, true)
 }
 
-// FormatSimple 格式化市场数据为字符串（不包含K线表格，用于候选币种）
+// FormatSimple 格式化市场数据为字符串（精简版，用于候选币种）
 func FormatSimple(data *Data) string {
-	return FormatWithKlineTable(data, false)
+	return FormatCompact(data)
+}
+
+// FormatCompact 格式化市场数据为紧凑格式（英文+压缩空格，保留所有数据）
+func FormatCompact(data *Data) string {
+	var sb strings.Builder
+	
+	// 基础指标（英文，一行）
+	sb.WriteString(fmt.Sprintf("Price:%.2f EMA20:%.2f MACD:%.3f RSI7:%.1f",
+		data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentRSI7))
+	if data.PriceChange1h != 0 || data.PriceChange4h != 0 {
+		sb.WriteString(fmt.Sprintf(" 1h:%+.2f%% 4h:%+.2f%%", data.PriceChange1h, data.PriceChange4h))
+	}
+	sb.WriteString("\n")
+	
+	// OI和资金费率
+	if data.OpenInterest != nil {
+		sb.WriteString(fmt.Sprintf("OI:%.0fM(avg:%.0fM) ", 
+			data.OpenInterest.Latest/1000000, data.OpenInterest.Average/1000000))
+	}
+	sb.WriteString(fmt.Sprintf("FR:%.4f%%\n", data.FundingRate*100))
+	
+	// 日内序列数据（压缩格式）
+	if data.IntradaySeries != nil {
+		shortTerm := DefaultKlineSettings[0]
+		sb.WriteString(fmt.Sprintf("Intraday(%s):", shortTerm.Interval))
+		
+		// K线数据（压缩成一行）
+		if len(data.IntradaySeries.Klines) > 0 {
+			displayCount := shortTerm.Limit
+			if displayCount > len(data.IntradaySeries.Klines) {
+				displayCount = len(data.IntradaySeries.Klines)
+			}
+			startIdx := len(data.IntradaySeries.Klines) - displayCount
+			
+			sb.WriteString(" OHLC:[")
+			for i := startIdx; i < len(data.IntradaySeries.Klines); i++ {
+				k := data.IntradaySeries.Klines[i]
+				if i > startIdx {
+					sb.WriteString(",")
+				}
+				sb.WriteString(fmt.Sprintf("[%.2f,%.2f,%.2f,%.2f]", k.Open, k.High, k.Low, k.Close))
+			}
+			sb.WriteString("]")
+		}
+		
+		// 技术指标（压缩）
+		if len(data.IntradaySeries.MidPrices) > 0 {
+			sb.WriteString(fmt.Sprintf(" Mid:%s", formatFloatSliceCompact(data.IntradaySeries.MidPrices)))
+		}
+		if len(data.IntradaySeries.EMA20Values) > 0 {
+			sb.WriteString(fmt.Sprintf(" EMA20:%s", formatFloatSliceCompact(data.IntradaySeries.EMA20Values)))
+		}
+		if len(data.IntradaySeries.MACDValues) > 0 {
+			sb.WriteString(fmt.Sprintf(" MACD:%s", formatFloatSliceCompact(data.IntradaySeries.MACDValues)))
+		}
+		if len(data.IntradaySeries.RSI7Values) > 0 {
+			sb.WriteString(fmt.Sprintf(" RSI7:%s", formatFloatSliceCompact(data.IntradaySeries.RSI7Values)))
+		}
+		if len(data.IntradaySeries.RSI14Values) > 0 {
+			sb.WriteString(fmt.Sprintf(" RSI14:%s", formatFloatSliceCompact(data.IntradaySeries.RSI14Values)))
+		}
+		
+		// K线形态
+		if len(data.IntradaySeries.Patterns) > 0 {
+			sb.WriteString(fmt.Sprintf(" Patterns:%s", strings.Join(data.IntradaySeries.Patterns, ",")))
+		}
+		sb.WriteString("\n")
+	}
+	
+	// 长期数据（压缩格式）
+	if data.LongerTermContext != nil && len(DefaultKlineSettings) > 1 {
+		longTerm := DefaultKlineSettings[1]
+		sb.WriteString(fmt.Sprintf("LongTerm(%s):", longTerm.Interval))
+		
+		// K线数据
+		if len(data.LongerTermContext.Klines) > 0 {
+			displayCount := longTerm.Limit
+			if displayCount > len(data.LongerTermContext.Klines) {
+				displayCount = len(data.LongerTermContext.Klines)
+			}
+			startIdx := len(data.LongerTermContext.Klines) - displayCount
+			
+			sb.WriteString(" OHLC:[")
+			for i := startIdx; i < len(data.LongerTermContext.Klines); i++ {
+				k := data.LongerTermContext.Klines[i]
+				if i > startIdx {
+					sb.WriteString(",")
+				}
+				sb.WriteString(fmt.Sprintf("[%.2f,%.2f,%.2f,%.2f]", k.Open, k.High, k.Low, k.Close))
+			}
+			sb.WriteString("]")
+		}
+		
+		sb.WriteString(fmt.Sprintf(" EMA20:%.2f EMA50:%.2f ATR3:%.2f ATR14:%.2f Vol:%.0f(avg:%.0f)",
+			data.LongerTermContext.EMA20, data.LongerTermContext.EMA50,
+			data.LongerTermContext.ATR3, data.LongerTermContext.ATR14,
+			data.LongerTermContext.CurrentVolume, data.LongerTermContext.AverageVolume))
+		
+		if len(data.LongerTermContext.MACDValues) > 0 {
+			sb.WriteString(fmt.Sprintf(" MACD:%s", formatFloatSliceCompact(data.LongerTermContext.MACDValues)))
+		}
+		if len(data.LongerTermContext.RSI14Values) > 0 {
+			sb.WriteString(fmt.Sprintf(" RSI14:%s", formatFloatSliceCompact(data.LongerTermContext.RSI14Values)))
+		}
+		sb.WriteString("\n")
+	}
+	
+	// 增强指标（压缩）
+	if data.EnhancedIndicators != nil {
+		sb.WriteString(fmt.Sprintf("Indicators: BB[%.2f,%.2f,%.2f] VWAP:%.2f Stoch[K:%.1f,D:%.1f] Williams:%.1f CCI:%.1f OBV:%.0f HVol:%.2f%%",
+			data.EnhancedIndicators.BollingerBands.Upper,
+			data.EnhancedIndicators.BollingerBands.Middle,
+			data.EnhancedIndicators.BollingerBands.Lower,
+			data.EnhancedIndicators.VWAP,
+			data.EnhancedIndicators.Stochastic.K,
+			data.EnhancedIndicators.Stochastic.D,
+			data.EnhancedIndicators.Williams,
+			data.EnhancedIndicators.CCI,
+			data.EnhancedIndicators.OBV,
+			data.EnhancedIndicators.HistoricalVol*100))
+		
+		if len(data.EnhancedIndicators.SupportLevels) > 0 && len(data.EnhancedIndicators.ResistanceLevels) > 0 {
+			sb.WriteString(fmt.Sprintf(" Support:%.2f Resist:%.2f", 
+				data.EnhancedIndicators.SupportLevels[0],
+				data.EnhancedIndicators.ResistanceLevels[0]))
+		}
+		sb.WriteString("\n")
+	}
+	
+	// 市场情绪（压缩）
+	if data.MarketSentiment != nil {
+		sb.WriteString(fmt.Sprintf("Sentiment: FG:%d L/S:%.2f Vol:%s Mom:%s Overall:%s\n",
+			data.MarketSentiment.FearGreedIndex,
+			data.MarketSentiment.BullBearRatio,
+			data.MarketSentiment.VolumeStrength,
+			data.MarketSentiment.MomentumSignal,
+			data.MarketSentiment.OverallSentiment))
+	}
+	
+	// 多空比详细数据（压缩）
+	if data.LongShortRatios != nil && len(data.LongShortRatios) > 0 {
+		sb.WriteString("L/S_Ratios: ")
+		periods := []string{"5m", "15m", "1h", "4h"}
+		first := true
+		for _, period := range periods {
+			if ratio, ok := data.LongShortRatios[period]; ok {
+				if !first {
+					sb.WriteString(", ")
+				}
+				first = false
+				sb.WriteString(fmt.Sprintf("%s:%.2f(L%.1f%%/S%.1f%%)", 
+					period, ratio.LongShortRatio,
+					ratio.LongAccount*100, ratio.ShortAccount*100))
+			}
+		}
+		sb.WriteString("\n")
+	}
+	
+	return sb.String()
+}
+
+// formatFloatSliceCompact 格式化浮点数数组为紧凑格式
+func formatFloatSliceCompact(values []float64) string {
+	maxValues := 8
+	if !CompactMode {
+		maxValues = len(values)
+	}
+	
+	startIdx := 0
+	if len(values) > maxValues {
+		startIdx = len(values) - maxValues
+	}
+	
+	var parts []string
+	for i := startIdx; i < len(values); i++ {
+		parts = append(parts, fmt.Sprintf("%.2f", values[i]))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+// getTrendDirection 获取趋势方向
+func getTrendDirection(price, ema float64) string {
+	diff := (price - ema) / ema * 100
+	if diff > 2 {
+		return "强上升"
+	} else if diff > 0.5 {
+		return "上升"
+	} else if diff < -2 {
+		return "强下降"
+	} else if diff < -0.5 {
+		return "下降"
+	}
+	return "横盘"
 }
 
 // FormatWithKlineTable 格式化市场数据，可选是否包含K线表格
@@ -948,14 +1180,91 @@ func FormatWithKlineTable(data *Data, showKlineTable bool) string {
 		}
 	}
 
+	// 增强技术指标
+	if data.EnhancedIndicators != nil {
+		sb.WriteString("\n**🔍 增强技术指标**\n")
+		sb.WriteString(fmt.Sprintf("布林带: 上轨=%.2f, 中轨=%.2f, 下轨=%.2f\n", 
+			data.EnhancedIndicators.BollingerBands.Upper, 
+			data.EnhancedIndicators.BollingerBands.Middle, 
+			data.EnhancedIndicators.BollingerBands.Lower))
+		sb.WriteString(fmt.Sprintf("VWAP: %.2f | 一目均衡: 转换线=%.2f, 基准线=%.2f\n", 
+			data.EnhancedIndicators.VWAP, 
+			data.EnhancedIndicators.Ichimoku.TenkanSen, 
+			data.EnhancedIndicators.Ichimoku.KijunSen))
+		sb.WriteString(fmt.Sprintf("随机指标: K=%.1f, D=%.1f | 威廉指标: %.1f\n", 
+			data.EnhancedIndicators.Stochastic.K, 
+			data.EnhancedIndicators.Stochastic.D, 
+			data.EnhancedIndicators.Williams))
+		sb.WriteString(fmt.Sprintf("CCI: %.1f | OBV: %.0f | 历史波动率: %.2f%%\n", 
+			data.EnhancedIndicators.CCI, 
+			data.EnhancedIndicators.OBV, 
+			data.EnhancedIndicators.HistoricalVol*100))
+		
+		if len(data.EnhancedIndicators.SupportLevels) > 0 && len(data.EnhancedIndicators.ResistanceLevels) > 0 {
+			sb.WriteString(fmt.Sprintf("支撑位: %.2f | 阻力位: %.2f\n", 
+				data.EnhancedIndicators.SupportLevels[0], 
+				data.EnhancedIndicators.ResistanceLevels[0]))
+		}
+		sb.WriteString(fmt.Sprintf("枢轴点: %.2f (R1=%.2f, S1=%.2f)\n\n", 
+			data.EnhancedIndicators.PivotPoints.Pivot, 
+			data.EnhancedIndicators.PivotPoints.R1, 
+			data.EnhancedIndicators.PivotPoints.S1))
+	}
+
+	// 市场情绪分析
+	if data.MarketSentiment != nil {
+		sb.WriteString("**📊 市场情绪分析**\n")
+		sb.WriteString(fmt.Sprintf("恐慌贪婪指数: %d | 多空比(1h): %.2f\n", 
+			data.MarketSentiment.FearGreedIndex, 
+			data.MarketSentiment.BullBearRatio))
+		sb.WriteString(fmt.Sprintf("成交量强度: %s | 动量信号: %s\n", 
+			data.MarketSentiment.VolumeStrength, 
+			data.MarketSentiment.MomentumSignal))
+		sb.WriteString(fmt.Sprintf("整体情绪: %s\n\n", data.MarketSentiment.OverallSentiment))
+	}
+	
+	// 多空比详细数据（多时间周期）
+	if data.LongShortRatios != nil && len(data.LongShortRatios) > 0 {
+		sb.WriteString("**⚖️ 多空比数据（多头/空头比例）**\n")
+		
+		// 按时间周期排序显示
+		periods := []string{"5m", "15m", "1h", "4h"}
+		for _, period := range periods {
+			if ratio, ok := data.LongShortRatios[period]; ok {
+				sentiment := "中性"
+				if ratio.LongShortRatio > 1.2 {
+					sentiment = "偏多"
+				} else if ratio.LongShortRatio < 0.8 {
+					sentiment = "偏空"
+				}
+				sb.WriteString(fmt.Sprintf("%s: %.2f (多头%.1f%% vs 空头%.1f%%) - %s\n", 
+					period, ratio.LongShortRatio, 
+					ratio.LongAccount*100, ratio.ShortAccount*100,
+					sentiment))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
 	return sb.String()
 }
 
 // formatFloatSlice 格式化float64切片为字符串
 func formatFloatSlice(values []float64) string {
-	strValues := make([]string, len(values))
-	for i, v := range values {
-		strValues[i] = fmt.Sprintf("%.3f", v)
+	// 优化：紧凑模式只取最后8个值，减少token消耗
+	maxValues := 8
+	if !CompactMode {
+		maxValues = len(values) // 完整模式显示全部
+	}
+	
+	startIdx := 0
+	if len(values) > maxValues {
+		startIdx = len(values) - maxValues
+	}
+	
+	strValues := make([]string, len(values)-startIdx)
+	for i, idx := 0, startIdx; idx < len(values); i, idx = i+1, idx+1 {
+		strValues[i] = fmt.Sprintf("%.2f", values[idx])
 	}
 	return "[" + strings.Join(strValues, ", ") + "]"
 }
@@ -1154,6 +1463,73 @@ func Normalize(symbol string) string {
 		return symbol
 	}
 	return symbol + "USDT"
+}
+
+// getLongShortRatios 获取多时间周期多空比数据
+func getLongShortRatios(symbol string) (map[string]*LongShortRatioData, error) {
+	periods := []string{"5m", "15m", "1h", "4h"}
+	result := make(map[string]*LongShortRatioData)
+	
+	for _, period := range periods {
+		ratio, err := getLongShortRatio(symbol, period)
+		if err != nil {
+			log.Printf("⚠️ 获取%s周期多空比失败: %v", period, err)
+			continue
+		}
+		result[period] = ratio
+	}
+	
+	if len(result) == 0 {
+		return nil, fmt.Errorf("所有周期的多空比获取都失败")
+	}
+	
+	return result, nil
+}
+
+// getLongShortRatio 获取单个周期的多空比数据
+func getLongShortRatio(symbol string, period string) (*LongShortRatioData, error) {
+	url := fmt.Sprintf("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=%s&period=%s&limit=1", symbol, period)
+	
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("请求API失败: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+	
+	var results []struct {
+		Symbol         string `json:"symbol"`
+		LongShortRatio string `json:"longShortRatio"`
+		LongAccount    string `json:"longAccount"`
+		ShortAccount   string `json:"shortAccount"`
+		Timestamp      int64  `json:"timestamp"`
+	}
+	
+	if err := json.Unmarshal(body, &results); err != nil {
+		return nil, fmt.Errorf("解析JSON失败: %w", err)
+	}
+	
+	if len(results) == 0 {
+		return nil, fmt.Errorf("没有返回数据")
+	}
+	
+	apiResult := results[0]
+	
+	ratio, _ := strconv.ParseFloat(apiResult.LongShortRatio, 64)
+	longAcc, _ := strconv.ParseFloat(apiResult.LongAccount, 64)
+	shortAcc, _ := strconv.ParseFloat(apiResult.ShortAccount, 64)
+	
+	return &LongShortRatioData{
+		Period:         period,
+		LongShortRatio: ratio,
+		LongAccount:    longAcc,
+		ShortAccount:   shortAcc,
+		Timestamp:      apiResult.Timestamp,
+	}, nil
 }
 
 // parseFloat 解析float值

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 	"nofx/api"
-	"nofx/config"
+	"nofx/database"
 	"nofx/manager"
 	"nofx/market"
 	"nofx/pool"
@@ -20,14 +20,9 @@ func main() {
 	fmt.Println("╚════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	// 加载配置文件
-	configFile := "config.json"
-	if len(os.Args) > 1 {
-		configFile = os.Args[1]
-	}
-
-	log.Printf("📋 加载配置文件: %s", configFile)
-	cfg, err := config.LoadConfig(configFile)
+	// 从数据库加载配置
+	log.Printf("📋 从数据库加载配置...")
+	cfg, err := database.LoadConfigFromDB()
 	if err != nil {
 		log.Fatalf("❌ 加载配置失败: %v", err)
 	}
@@ -90,6 +85,10 @@ func main() {
 		enabledCount++
 		log.Printf("📦 [%d/%d] 初始化 %s (%s模型)...",
 			i+1, len(cfg.Traders), traderCfg.Name, strings.ToUpper(traderCfg.AIModel))
+		
+		// 调试：打印trader配置
+		log.Printf("[DEBUG] Trader配置: ID=%s AIAutonomyMode=%v CompactMode=%v", 
+			traderCfg.ID, traderCfg.AIAutonomyMode, traderCfg.CompactMode)
 
 		err := traderManager.AddTrader(
 			traderCfg,
@@ -101,6 +100,8 @@ func main() {
 			cfg.MaxPositions,      // 传递最大持仓数配置
 			cfg.EnableAILearning,  // AI学习开关
 			cfg.AILearnInterval,   // AI学习间隔
+			traderCfg.AIAutonomyMode, // AI自主模式
+			traderCfg.CompactMode,    // 数据优化模式
 		)
 		if err != nil {
 			log.Fatalf("❌ 初始化trader失败: %v", err)
@@ -109,7 +110,7 @@ func main() {
 
 	// 检查是否至少有一个启用的trader
 	if enabledCount == 0 {
-		log.Fatalf("❌ 没有启用的trader，请在config.json中设置至少一个trader的enabled=true")
+		log.Fatalf("❌ 没有启用的trader，请在数据库中设置至少一个trader的enabled=true")
 	}
 
 	fmt.Println()

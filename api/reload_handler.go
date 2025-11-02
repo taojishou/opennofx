@@ -2,23 +2,23 @@ package api
 
 import (
 	"log"
-	"nofx/config"
+	"nofx/database"
 	"nofx/market"
 
 	"github.com/gin-gonic/gin"
 )
 
-// handleReloadConfig 热重载配置
+// handleReloadConfig 热重载配置 - 从数据库重新加载
 func (s *Server) handleReloadConfig(c *gin.Context) {
 	log.Println("🔄 收到热重载请求...")
 
-	// 1. 重新读取config.json
-	newConfig, err := config.LoadConfig(config.GetConfigFilePath())
+	// 1. 从数据库重新读取配置
+	newConfig, err := database.LoadConfigFromDB()
 	if err != nil {
 		log.Printf("❌ 加载配置失败: %v\n", err)
 		c.JSON(500, gin.H{
 			"success": false,
-			"error":   "加载配置文件失败: " + err.Error(),
+			"error":   "加载配置失败: " + err.Error(),
 		})
 		return
 	}

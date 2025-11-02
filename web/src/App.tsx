@@ -6,6 +6,7 @@ import { CompetitionPage } from './components/CompetitionPage';
 import AILearning from './components/AILearning';
 import ConfigManagement from './components/ConfigManagement';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
+import { ToastProvider } from './components/ui/Toast';
 import { t, type Language } from './i18n/translations';
 import type {
   SystemStatus,
@@ -902,11 +903,13 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
   );
 }
 
-// Wrap App with LanguageProvider
-export default function AppWithLanguage() {
+// Wrap App with LanguageProvider and ToastProvider
+export default function AppWithProviders() {
   return (
     <LanguageProvider>
-      <App />
+      <ToastProvider>
+        <App />
+      </ToastProvider>
     </LanguageProvider>
   );
 }

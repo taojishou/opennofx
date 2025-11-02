@@ -42,6 +42,12 @@ type TraderConfig struct {
 
 	InitialBalance      float64 `json:"initial_balance"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
+	
+	// AI自主模式（true=完全自主决策，false=限制模式）
+	AIAutonomyMode bool `json:"ai_autonomy_mode"`
+	
+	// 数据优化配置（true=紧凑模式，false=完整模式）
+	CompactMode bool `json:"compact_mode"`
 }
 
 // LeverageConfig 杠杆配置
@@ -77,6 +83,8 @@ type Config struct {
 	Leverage           LeverageConfig   `json:"leverage"`           // 杠杆配置
 	EnableAILearning   bool             `json:"enable_ai_learning"` // 是否启用AI自动学习
 	AILearnInterval    int              `json:"ai_learn_interval"`  // AI学习间隔（周期数）
+	AIAutonomyMode     bool             `json:"ai_autonomy_mode"`   // AI自主模式（全局开关）
+	CompactMode        bool             `json:"compact_mode"`       // 数据优化模式（紧凑/完整）
 	MarketData         MarketDataConfig `json:"market_data"`        // 市场数据配置
 }
 
