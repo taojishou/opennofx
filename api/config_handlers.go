@@ -177,8 +177,10 @@ func (s *Server) handleUpdateTraderConfig(c *gin.Context) {
 		return
 	}
 
-	// 保留原密钥（如果新请求中的密钥是脱敏的则不更新）
+	// 保留原密钥（如果新请求中的密钥是脱敏的或为空则不更新）
 	// 脱敏格式: "xxxx****xxxx"，所以检查是否包含****
+	// 前端编辑时，不修改的字段会删除，所以这里字段缺失表示保持原值
+	// 注意：使用指针类型字段可以更好地区分"未提供"和"空字符串"，但为了兼容性，这里通过trim判断
 	if req.BinanceAPIKey != "" && !isMaskedKey(req.BinanceAPIKey) {
 		dbTrader.BinanceAPIKey = req.BinanceAPIKey
 	}

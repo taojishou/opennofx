@@ -67,17 +67,83 @@ export default function TraderFormModal({
       return '请填写所有必填字段';
     }
 
-    if (form.exchange === 'binance' && (!form.binance_api_key || !form.binance_secret_key)) {
-      return '使用币安时必须配置API Key和Secret Key';
+    // 检查字段是否为空字符串（清空后的状态）
+    const isMasked = (value: string | undefined) => {
+      if (!value) return false;
+      return value === '****' || value.includes('••••') || (value.length > 4 && value.includes('****'));
+    };
+
+    // 交易所配置验证
+    if (form.exchange === 'binance') {
+      const apiKey = form.binance_api_key?.trim();
+      const secretKey = form.binance_secret_key?.trim();
+      
+      // 新增模式：必须填写
+      if (!isEdit && (!apiKey || !secretKey)) {
+        return '使用币安时必须配置API Key和Secret Key';
+      }
+      
+      // 编辑模式：如果填写了非空且非脱敏值，则需要同时填写两个
+      if (isEdit) {
+        const hasApiKey = apiKey && !isMasked(apiKey);
+        const hasSecretKey = secretKey && !isMasked(secretKey);
+        // 如果只填写了其中一个，报错
+        if ((hasApiKey && !hasSecretKey) || (!hasApiKey && hasSecretKey)) {
+          return '更新币安密钥时，请同时填写API Key和Secret Key，或留空保持不变';
+        }
+      }
     }
-    if (form.exchange === 'hyperliquid' && !form.hyperliquid_private_key) {
-      return '使用Hyperliquid时必须配置Private Key';
+    
+    if (form.exchange === 'hyperliquid') {
+      const privateKey = form.hyperliquid_private_key?.trim();
+      if (!isEdit && !privateKey) {
+        return '使用Hyperliquid时必须配置Private Key';
+      }
+      // 编辑模式下，如果清空了就报错
+      if (isEdit && privateKey === '' && !isMasked(trader.hyperliquid_private_key || '')) {
+        return 'Private Key不能为空，如不修改请留空';
+      }
     }
-    if (form.ai_model === 'qwen' && !form.qwen_key) {
-      return '使用Qwen时必须配置API Key';
+    
+    if (form.exchange === 'aster') {
+      const user = form.aster_user?.trim();
+      const signer = form.aster_signer?.trim();
+      const privateKey = form.aster_private_key?.trim();
+      
+      if (!isEdit && (!user || !signer || !privateKey)) {
+        return '使用Aster时必须配置所有地址和私钥';
+      }
     }
-    if (form.ai_model === 'deepseek' && !form.deepseek_key) {
-      return '使用DeepSeek时必须配置API Key';
+    
+    // AI配置验证
+    if (form.ai_model === 'qwen') {
+      const qwenKey = form.qwen_key?.trim();
+      if (!isEdit && !qwenKey) {
+        return '使用Qwen时必须配置API Key';
+      }
+      if (isEdit && qwenKey === '' && !isMasked(trader.qwen_key || '')) {
+        return 'Qwen API Key不能为空，如不修改请留空';
+      }
+    }
+    
+    if (form.ai_model === 'deepseek') {
+      const deepseekKey = form.deepseek_key?.trim();
+      if (!isEdit && !deepseekKey) {
+        return '使用DeepSeek时必须配置API Key';
+      }
+      if (isEdit && deepseekKey === '' && !isMasked(trader.deepseek_key || '')) {
+        return 'DeepSeek API Key不能为空，如不修改请留空';
+      }
+    }
+    
+    if (form.ai_model === 'custom') {
+      const apiUrl = form.custom_api_url?.trim();
+      const apiKey = form.custom_api_key?.trim();
+      const modelName = form.custom_model_name?.trim();
+      
+      if (!isEdit && (!apiUrl || !apiKey || !modelName)) {
+        return '使用自定义模型时必须配置API URL、API Key和模型名称';
+      }
     }
 
     return null;
@@ -91,11 +157,32 @@ export default function TraderFormModal({
     }
 
     const processedForm = { ...form };
+    
+    // 处理私钥前缀
     if (processedForm.hyperliquid_private_key?.startsWith('0x') || processedForm.hyperliquid_private_key?.startsWith('0X')) {
       processedForm.hyperliquid_private_key = processedForm.hyperliquid_private_key.slice(2);
     }
     if (processedForm.aster_private_key?.startsWith('0x') || processedForm.aster_private_key?.startsWith('0X')) {
       processedForm.aster_private_key = processedForm.aster_private_key.slice(2);
+    }
+    
+    // 编辑模式下：清理空字符串字段（避免覆盖已有配置）
+    if (isEdit) {
+      const isMasked = (value: string | undefined) => {
+        if (!value) return false;
+        return value === '****' || value.includes('••••') || (value.length > 4 && value.includes('****'));
+      };
+      
+      // 如果是脱敏值或空字符串，删除该字段（后端会保留原值）
+      Object.keys(processedForm).forEach(key => {
+        const value = processedForm[key as keyof TraderConfig] as string;
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          if (trimmed === '' || isMasked(value)) {
+            delete processedForm[key as keyof TraderConfig];
+          }
+        }
+      });
     }
 
     onSave(processedForm as TraderConfig);
